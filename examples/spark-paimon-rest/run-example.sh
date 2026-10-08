@@ -128,7 +128,7 @@ echo "   服务端就绪"
   "-Dpaimon.uri=$BASE" \
   "-Dpaimon.token=$TOKEN" \
   "-Dpaimon.database=$DATABASE" \
-  com.example.paimonrest.examples.SparkPaimonRestExample
+  io.github.melin.paimonrest.examples.SparkPaimonRestExample
 STATUS=$?
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,13 @@ Spring Boot 父 POM。
 两个模块的依赖世界因此互不污染：服务端是 Spring Boot 4 / Jackson 3 / Hibernate 7，
 Spark 侧是 Scala 2.12 / Spark 3.5 / Jackson 2 / ANTLR 4.9.3。
 
+Maven 坐标与包名：`groupId` 为 `io.github.melin`，三个 artifact 分别是
+`paimon-rest-parent`（聚合）、`paimon-rest-server`、`paimon-rest-spark`；
+源码包前缀统一为 `io.github.melin.paimonrest`，Spark 模块在其下再用 `.spark`
+子包（如 `io.github.melin.paimonrest.spark.ManagementSparkExtensions`）——
+这个全限定名就是要填进 `spark.sql.extensions` 的值，改动它等于破坏所有既有部署，
+因此与 groupId 一起固定下来。
+
 `docs/` 里六份文档的分工：
 
 | 文档 | 读它的时机 |
@@ -97,7 +104,7 @@ mysql -h 127.0.0.1 -u root -p < sql/schema-mysql.sql
 # 全量构建
 JAVA_HOME=/path/to/jdk-21 ./mvnw -DskipTests install
 
-# 运行全部测试（服务端 88 + Spark 76，共 164 个用例）
+# 运行全部测试（服务端 104 + Spark 76，共 180 个用例）
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
 
 # 启动服务端（默认 8080 端口，连 MySQL，预置 catalog prefix=paimon 与 database=default）

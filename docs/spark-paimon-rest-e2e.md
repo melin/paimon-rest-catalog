@@ -31,7 +31,7 @@
 
 ```properties
 # 两个扩展都要装，缺 Paimon 那个会被它自己的启动检查拦下
-spark.sql.extensions=com.example.paimonrest.spark.ManagementSparkExtensions,org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions
+spark.sql.extensions=io.github.melin.paimonrest.spark.ManagementSparkExtensions,org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions
 
 spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog
 spark.sql.catalog.paimon.metastore=rest
@@ -54,7 +54,7 @@ Spark 原生解析器，与 Paimon 注入的规则不重叠，因此谁在前都
 ```bash
 spark-sql \
   --jars paimon-spark-3.5_2.12-2.0.0.jar \
-  --conf spark.sql.extensions=com.example.paimonrest.spark.ManagementSparkExtensions,org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
+  --conf spark.sql.extensions=io.github.melin.paimonrest.spark.ManagementSparkExtensions,org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions \
   --conf spark.sql.catalog.paimon=org.apache.paimon.spark.SparkCatalog \
   --conf spark.sql.catalog.paimon.metastore=rest \
   --conf spark.sql.catalog.paimon.uri=http://127.0.0.1:8080 \

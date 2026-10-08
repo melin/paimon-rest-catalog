@@ -40,10 +40,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPEC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "spec/polaris-management-service.yml")
 DOC = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "docs/spark-sql-reference.md")
 
-GRAMMAR = os.path.join(ROOT, "paimon-rest-spark/src/main/antlr4/com/example/paimonrest/spark/parser/ManagementSql.g4")
-COMMANDS = os.path.join(ROOT, "paimon-rest-spark/src/main/scala/com/example/paimonrest/spark/ManagementCommands.scala")
-EXTENSIONS = os.path.join(ROOT, "paimon-rest-spark/src/main/scala/com/example/paimonrest/spark/ManagementSparkExtensions.scala")
-CLIENT = os.path.join(ROOT, "paimon-rest-spark/src/main/java/com/example/paimonrest/spark/client/ManagementApiClient.java")
+GRAMMAR = os.path.join(ROOT, "paimon-rest-spark/src/main/antlr4/io/github/melin/paimonrest/spark/parser/ManagementSql.g4")
+COMMANDS = os.path.join(ROOT, "paimon-rest-spark/src/main/scala/io/github/melin/paimonrest/spark/ManagementCommands.scala")
+EXTENSIONS = os.path.join(ROOT, "paimon-rest-spark/src/main/scala/io/github/melin/paimonrest/spark/ManagementSparkExtensions.scala")
+CLIENT = os.path.join(ROOT, "paimon-rest-spark/src/main/java/io/github/melin/paimonrest/spark/client/ManagementApiClient.java")
 
 problems = []
 checks = 0

@@ -18,7 +18,7 @@ SHOW GRANTS FOR CATALOG ROLE reader IN CATALOG paimon;
 
 ```bash
 spark-sql \
-  --conf spark.sql.extensions=com.example.paimonrest.spark.ManagementSparkExtensions \
+  --conf spark.sql.extensions=io.github.melin.paimonrest.spark.ManagementSparkExtensions \
   --conf spark.paimon.rest.management.url=http://catalog-host:8080/api/management/v1 \
   --conf spark.paimon.rest.token=<执行这些语句的主体的令牌>
 ```
@@ -153,7 +153,7 @@ Spark 3.5 的 `SqlBase.g4` 是**封闭**的：它的 `statement` 规则没有类
 官方扩展点 `ParserInterface` 也不提供「往已有语法里加规则」的能力。
 
 因此本模块自带一份只描述管理语句的小语法
-（`paimon-rest-spark/src/main/antlr4/com/example/paimonrest/spark/parser/ManagementSql.g4`），
+（`paimon-rest-spark/src/main/antlr4/io/github/melin/paimonrest/spark/parser/ManagementSql.g4`），
 在 `ParserInterface.parsePlan` 里**先试自己的解析器**：
 
 - 解析成功 → 执行管理操作；

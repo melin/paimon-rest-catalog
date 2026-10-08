@@ -1,4 +1,4 @@
-package com.example.paimonrest.examples;
+package io.github.melin.paimonrest.examples;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -87,7 +87,7 @@ public final class SparkPaimonRestExample {
                 // 本项目的扩展放在前面：它先识别管理语句，识别不了就原样交回
                 // Spark 原生解析器，与 Paimon 注入的规则不重叠。
                 .config("spark.sql.extensions",
-                        "com.example.paimonrest.spark.ManagementSparkExtensions,"
+                        "io.github.melin.paimonrest.spark.ManagementSparkExtensions,"
                                 + "org.apache.paimon.spark.extensions.PaimonSparkSessionExtensions")
                 .config("spark.sql.catalog." + CATALOG, "org.apache.paimon.spark.SparkCatalog")
                 .config("spark.sql.catalog." + CATALOG + ".metastore", "rest")

@@ -28,7 +28,7 @@ SHOW GRANTS FOR CATALOG ROLE etl_reader IN CATALOG paimon;
 
 ```bash
 spark-sql \
-  --conf spark.sql.extensions=com.example.paimonrest.spark.ManagementSparkExtensions \
+  --conf spark.sql.extensions=io.github.melin.paimonrest.spark.ManagementSparkExtensions \
   --conf spark.paimon.rest.management.url=http://catalog-host:8080/api/management/v1 \
   --conf spark.paimon.rest.token=<执行这些语句的主体的令牌>
 ```

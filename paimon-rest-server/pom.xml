@@ -13,7 +13,7 @@
 		<version>4.1.1</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
-	<groupId>com.example</groupId>
+	<groupId>io.github.melin</groupId>
 	<artifactId>paimon-rest-server</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name>paimon-rest-server</name>
