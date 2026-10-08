@@ -71,6 +71,46 @@ paimon:
     credential:
       # 数据访问令牌（凭证下发）有效期
       ttl-seconds: 3600
+    # -----------------------------------------------------------------------
+    # 存储与凭据，对应 Polaris 1.8.0 配置参考的「Storage & Credentials」一节。
+    # 键名逐项对应，只把前缀从 polaris 换成 paimon.rest，运维迁配置时可以按名字平移。
+    # -----------------------------------------------------------------------
+    storage:
+      aws:
+        # 默认 S3 凭据：未指定 storageName 的 S3 catalog 用它。两项留空则退化为
+        # 环境凭据链（实例角色、环境变量、配置文件），与 Polaris 的行为一致
+        access-key: ""
+        secret-key: ""
+        # 具名存储，键为 catalog 的 storageConfigInfo.storageName。
+        # 密钥只留在服务端配置里，不落进 catalog 元数据——这是本工程里唯一
+        # 让 S3 密钥不出现在管理 API 报文中的途径
+        storages: {}
+      gcp:
+        # GCS 访问令牌；留空则交给引擎自己的凭据链
+        token: ""
+        # 令牌有效期；非空时会同时收窄令牌自身与响应里的 expiresAt
+        lifespan: null
+      # 以下连接参数当前只做取值校验与启动日志输出：JDK 的 HttpClient 没有
+      # 对应的调节项，保留它们是为了配置面与 Polaris 一一对应
+      clients-cache-max-size: 100
+      max-http-connections: 20
+      read-timeout: 30s
+      connect-timeout: 10s
+      connection-acquisition-timeout: 10s
+      connection-max-idle-time: 5m
+      connection-time-to-live: 30m
+      expect-continue-enabled: true
+    storage-credential-cache:
+      # 已下发凭据的复用上限；条目按各自过期时间失效，这个值只兜住内存占用
+      max-entries: 10000
+    credential-manager:
+      # default：按 catalog 的存储类型下发凭据
+      # noop：不下发，读表走到凭据下发接口时返回 501（引擎自带云凭据的部署用）
+      type: default
+    file-io:
+      # 本部署接入了哪些存储实现，决定 catalog 允许的 storageType：
+      # default -> FILE/S3/AZURE/GCS；s3|azure|gcs -> 对应云存储 + FILE；local -> 仅 FILE
+      type: default
     initial-catalog:
       # 启动时预置的 catalog；留空表示不预置
       prefix: paimon

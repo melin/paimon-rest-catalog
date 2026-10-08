@@ -80,6 +80,15 @@ data:
         # 这是有意保留的演示取舍：生产环境应当关掉（false），否则任何人用任意
         # prefix 调一次 /v1/config 就能登记出新 catalog，在多租户下是一个越权入口。
         auto-create-catalog: true
+        # 本清单是「本地文件仓库」的部署：warehouse 是挂载卷，因此这里不配
+        # paimon.rest.storage.*（S3 / Azure / GCS 的服务端凭据）。
+        # 要用对象存储时，除了在这里加 storage 段，还要注意两件事：
+        #   1) file-io.type 决定 catalog 允许的 storageType，默认 default 接受全部四种，
+        #      只在确实没装某个实现时才收窄；
+        #   2) S3 密钥可放在 storage.aws.storages.<name> 下，由 catalog 的
+        #      storageConfigInfo.storageName 引用，这样密钥不会落进 catalog 元数据——
+        #      直接写进 storageConfigInfo 的密钥是会被完整存进库并回显的。
+        # 完整键名与默认值见 README「配置项」一节。
         auth:
           # 开启 Bearer 鉴权。K8s 部署通常要经 Ingress 暴露到集群外，
           # 不开鉴权等于把管理面（创建 catalog、改授权、下发凭证）公开。

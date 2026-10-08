@@ -49,7 +49,8 @@ Paimon 的 REST Catalog 规格遵循同一范式，但对象模型不同：Polar
 | 多租户 / 多 catalog | 路径前缀 `{prefix}` 即 catalog 标识 | `CatalogEntity` + `CatalogService.resolve()`，支持未登记 prefix 自动登记 |
 | catalog 类型（internal / external） | `register` 进来的表标记 `isExternal` | `TableEntity.external` + `POST .../databases/{database}/register` |
 | 存储配置抽象 | `warehouse` + 表路径约定 | `default-warehouse` 与 `path-template` 配置项；路径按 `warehouse/database.db/table` 推导 |
-| 凭证下发 | `GET .../tables/{table}/token` | `CredentialService.token()`：按表签发短期令牌并返回 `expiresAt` |
+| 存储类型与凭据（S3 / Azure / GCS） | `StorageConfigInfo` 判别联合 + `polaris.storage.*` 配置 | 管理面四种 `storageType` 完整建模并落库（`StorageConfigs`）；服务端侧配置面见 `RestServerProperties.Storage`、`CredentialManager`、`FileIo`，下发规则见 `StorageCredentialManager` |
+| 凭证下发 | `GET .../tables/{table}/token` | `CredentialService.token()`：按 catalog 的存储类型分派，经 `StorageCredentialCache` 复用未过期凭据并返回 `expiresAt` |
 | 查询鉴权与策略下推 | `POST .../tables/{table}/auth` | `CredentialService.auth()`：返回行过滤表达式与列脱敏映射；请求列不在 schema 中时返回 403 |
 | RBAC 细粒度权限 | 由 REST Management API 承担权限面 | 已实现：主体 → principal role → catalog role → 资源授权的完整链路，并作为 `/v1/**` 的判定依据。见第六节 |
 | 治理面（实体标签 / 行过滤 / 列脱敏策略） | REST Management API（独立规格） | 实体标签未实现；行过滤与列脱敏未实现，`auth` 端点返回空规则。见第八节 |
@@ -77,14 +78,29 @@ Paimon 的 REST Catalog 规格遵循同一范式，但对象模型不同：Polar
 
 `auth.enabled=false`（默认）时所有请求以 `anonymous` 通过，便于本地开发。
 
-### 3. 凭证下发按表收窄
+### 3. 凭证下发按存储类型分派
 
-令牌内容包含 `accessKeyId`（与表 id 绑定）、随机 `accessKeySecret` / `securityToken`、
-`expiration` 以及表路径。范围限定到单表、时效由 `credential.ttl-seconds` 控制，
-对应 Polaris 的短时效、按需授权模型。
+下发的键由 catalog 的 `storageConfigInfo.storageType` 决定，而不是所有类型共用一个形状：
 
-当前签发的是自包含令牌；生产环境应把 `CredentialService.token()` 替换为对接云 IAM 的
-STS 调用，这是本实现预留的唯一外部集成点。
+| storageType | 下发的键 | 密钥来源 |
+| --- | --- | --- |
+| `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | 具名存储 → 默认配置 → 环境凭据链 |
+| `AZURE` | `azure.tenant-id`、`azure.account`、`azure.hierarchical`、`azure.multi-tenant-app-name`、`azure.consent-url` | 仅定位元数据 |
+| `GCS` | `gcs.oauth2.token`、`gcs.oauth2.token-expires-at`、`gcs.service-account` | 服务端配置 → 环境凭据链 |
+| `FILE` | 自包含令牌（`accessKeyId` / `securityToken` / `expiration` / `tablePath`） | 服务端自签 |
+
+选定的实现由 `paimon.rest.credential-manager.type` 决定：`default` 走上面的分派，
+`noop` 不下发（读表接口返回 501）。策略在 `StorageRuntimePolicy` 里于启动期解析，
+取值非法直接启动失败。
+
+范围限定到单表、时效由 `credential.ttl-seconds` 控制（GCS 的 `lifespan` 更短时收窄），
+对应 Polaris 的短时效、按需授权模型。未过期的凭据在
+`paimon.rest.storage-credential-cache.max-entries` 的容量内被复用，同一张表反复读拿到的是同一份凭据。
+
+**边界。** `S3` 与 `GCS` 下发的是服务端长期密钥或配置令牌，不是 STS / OAuth 换取的临时凭据——
+这需要服务端持有云侧信任关系。`AZURE` 只传定位元数据：Polaris 的 `polaris.storage.*` 里没有
+Azure 账户密钥，它靠服务进程自身的 Azure 标识签 SAS，本工程没有那层标识。
+接入真实临时凭据时应替换 `DefaultStorageCredentialManager` 的对应分支，这是本实现预留的外部集成点。
 
 ### 4. 元数据模型按「当前值 + 历史版本」组织
 

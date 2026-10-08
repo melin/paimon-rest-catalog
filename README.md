@@ -97,7 +97,7 @@ mysql -h 127.0.0.1 -u root -p < sql/schema-mysql.sql
 # 全量构建
 JAVA_HOME=/path/to/jdk-21 ./mvnw -DskipTests install
 
-# 运行全部测试（服务端 57 + Spark 76，共 133 个用例）
+# 运行全部测试（服务端 88 + Spark 76，共 164 个用例）
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
 
 # 启动服务端（默认 8080 端口，连 MySQL，预置 catalog prefix=paimon 与 database=default）
@@ -464,6 +464,60 @@ Catalog 侧与鉴权：
 管理面启动时会预置：引导主体、引导 principal role，以及各 catalog 的 `catalog_admin` 角色。
 没有这条引导链，全新部署里没有任何主体能创建第一个主体。
 
+存储与凭据，对应 Polaris 1.8.0 配置参考的
+[Storage & Credentials](https://polaris.apache.org/releases/1.8.0/configuration/configuration-reference/#storage--credentials)
+一节，键名逐项对应，只把前缀从 `polaris` 换成 `paimon.rest`：
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `paimon.rest.storage.aws.access-key` | 空 | S3 默认凭据；留空则退化为环境凭据链 |
+| `paimon.rest.storage.aws.secret-key` | 空 | 同上 |
+| `paimon.rest.storage.aws.storages.<name>.access-key` | 空 | 具名存储，键为 catalog 的 `storageConfigInfo.storageName` |
+| `paimon.rest.storage.aws.storages.<name>.secret-key` | 空 | 同上 |
+| `paimon.rest.storage.gcp.token` | 空 | GCS 访问令牌；留空则交给引擎自己的凭据链 |
+| `paimon.rest.storage.gcp.lifespan` | 空 | GCS 令牌有效期；比 `credential.ttl-seconds` 短时收窄 `expiresAt` |
+| `paimon.rest.storage.clients-cache-max-size` | 空 | 保留项，见下方说明 |
+| `paimon.rest.storage.max-http-connections` | 空 | 保留项，见下方说明 |
+| `paimon.rest.storage.read-timeout` | 空 | 读取超时；正数校验 |
+| `paimon.rest.storage.connect-timeout` | 空 | 建连超时；正数校验 |
+| `paimon.rest.storage.connection-acquisition-timeout` | 空 | 保留项，见下方说明 |
+| `paimon.rest.storage.connection-max-idle-time` | 空 | 保留项，见下方说明 |
+| `paimon.rest.storage.connection-time-to-live` | 空 | 保留项，见下方说明 |
+| `paimon.rest.storage.expect-continue-enabled` | 空 | 保留项，见下方说明 |
+| `paimon.rest.storage-credential-cache.max-entries` | `10000` | 已下发凭据的复用上限，条目按各自过期时间失效 |
+| `paimon.rest.credential-manager.type` | `default` | `default` 下发凭据；`noop` 不下发，读表接口返回 501 |
+| `paimon.rest.file-io.type` | `default` | 本部署接入的存储实现：`default`/`s3`/`azure`/`gcs`/`local` |
+
+「保留项」指这些取值会被校验并在启动时打进日志，但当前实现没有出网的对象存储客户端，
+JDK 的 `HttpClient` 也没有对应的调节项，因此它们不改变行为。保留是为了让配置面与 Polaris
+一一对应，迁移时不必删配置。`read-timeout` 与 `connect-timeout` 之外的连接池参数属于此类。
+
+`paimon.rest.file-io.type` 决定 catalog 允许的 `storageType`：`default` 接受全部四种，
+`s3`/`azure`/`gcs` 只接受对应云存储加 `FILE`，`local` 只接受 `FILE`。
+不接受本部署没有实现的存储类型时，创建或修改 catalog 直接返回 400，而不是让错误
+推迟到引擎第一次读写时才以文件系统异常暴露。`FILE` 在所有取值下都保留，它是本地的退路。
+
+`paimon.rest.credential-manager.type=noop` 适合引擎自带云凭据的部署。
+关掉下发之后，引擎的凭据来源只剩一个，排查权限问题时不必再去猜
+「到底用了服务端给的那份还是它自己那份」。
+
+数据访问凭据下发按 catalog 的存储类型分派，各类型产出的键：
+
+| storageType | 下发的键 | 密钥来源 |
+| --- | --- | --- |
+| `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | 具名存储 → 默认配置 → 环境凭据链 |
+| `AZURE` | `azure.tenant-id`、`azure.account`、`azure.hierarchical`、`azure.multi-tenant-app-name`、`azure.consent-url` | 仅定位元数据，见下 |
+| `GCS` | `gcs.oauth2.token`、`gcs.oauth2.token-expires-at`、`gcs.service-account` | 服务端配置 → 环境凭据链 |
+| `FILE` | 自包含令牌（`accessKeyId`/`securityToken`/`expiration`/`tablePath`） | 服务端自签，文件系统本身不校验 |
+
+`endpointInternal`、`stsEndpoint`、`roleArn`、`externalId`、`userArn` 一律不下发：
+前者规格明确写了客户端看不到，后三者是服务端去换临时凭据的材料。
+下发的键名写错不会报错，只会让引擎静默拿不到凭据，因此每种类型都有断言键名本身的测试。
+
+Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.storage.*` 里没有 Azure 账户密钥这一项，
+它靠服务进程自身的 Azure 标识签 SAS，而本工程没有那层标识。硬造一个签名错误的 SAS
+比不给更糟，因此这里传租户与账户，由引擎用它自己的身份换取访问权。
+
 ---
 
 ## 9. 实现说明与已知边界
@@ -526,7 +580,7 @@ Catalog 侧与鉴权：
 
 ## 10. 测试
 
-### 单元与集成测试（133 个用例）
+### 单元与集成测试（164 个用例）
 
 ```bash
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
@@ -535,7 +589,7 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 测试连的是内存 H2（`test` profile，见 `src/test/resources/application-test.yml`），
 **不依赖本机是否有 MySQL**。
 
-服务端（57 个）：
+服务端（88 个）：
 
 | 测试类 | 覆盖 |
 | --- | --- |
@@ -543,6 +597,9 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 | `ManagementApiTests` | 管理 API 的主体、角色、装配与授权链路 |
 | `StorageConfigApiTests` | `storageConfigInfo` 四种存储类型的建 / 读 / 改往返、`AZURE` 缺 `tenantId` 与空位置的 400、换存储后新库位置随之改变 |
 | `StorageConfigDtosTests` | 判别联合的绑定位形：子类型注册名与枚举一致、判别字段只出现一次、跨类型字段不串、落库路径（`Json`）往返 |
+| `StorageCredentialApiTests` | 按存储类型下发凭据的 HTTP 链路：S3 的密钥来源（默认配置与具名存储）与不下发 `endpointInternal` / `stsEndpoint`、`stsUnavailable` 时不给密钥、Azure 只给定位元数据、GCS 的 `lifespan` 收窄 `expiresAt`、FILE 保留自包含令牌、未过期凭据被复用（比对 `expiresAt` 而非密钥） |
+| `StorageCredentialResolutionTests` | 凭据解析与缓存的单元行为：具名存储优先且找不到时明确失败而非退回默认凭据、服务端专用字段不泄露、Azure 账户名只在已知端点后缀上解析、GCS `lifespan` 与 `ttl` 取小、LRU 淘汰与过期失效、两个策略枚举的取值校验与错误信息 |
+| `StoragePolicyApiTests` | `file-io.type=s3` 时拒绝 Azure / GCS catalog 并在报错里点明原因、接受 S3 与 FILE；`credential-manager.type=noop` 时凭据下发返回 501 |
 | `AuthorizationTests` | 权限蕴含与判定的单元行为 |
 | `CatalogEndpointAuthorizationTests` | 从运行时请求映射枚举全部 `/v1/{prefix}/**` 端点，逐一核对授权映射是否已登记——新增端点若忘记登记映射会让构建失败 |
 | `MysqlDdlGeneratorTests` | 由实体元数据生成 MySQL DDL，并断言方言被钉在 MySQL 8.0（见「代码生成」） |

@@ -1,19 +1,19 @@
 package com.example.paimonrest.service;
 
-import com.example.paimonrest.config.RestServerProperties;
+import com.example.paimonrest.domain.entity.CatalogEntity;
 import com.example.paimonrest.domain.entity.TableEntity;
+import com.example.paimonrest.domain.repo.CatalogRepository;
+import com.example.paimonrest.dto.StorageDtos.StorageConfigInfo;
 import com.example.paimonrest.dto.TableDtos;
 import com.example.paimonrest.dto.TypeDtos;
 import com.example.paimonrest.support.ApiException;
 import com.example.paimonrest.support.Codecs;
-import java.security.SecureRandom;
-import java.time.Instant;
+import com.example.paimonrest.support.ResourceType;
+import com.example.paimonrest.support.StorageConfigs;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -22,33 +22,42 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * 表级数据访问授权，对应 Polaris 的凭证下发模型。
  *
- * <p>引擎不直接持有对象存储的长期密钥：先向目录服务申请一个短时效、范围限定到单表的
- * 令牌，服务端确认调用方有权访问该表后才签发。这里签发的是自包含令牌，
- * 生产环境可替换为对接云 IAM 的 STS 调用。
+ * <p>引擎不直接持有对象存储的长期密钥：先向目录服务申请一份范围限定到单表、
+ * 有明确过期时间的凭据，服务端确认调用方有权访问该表后才签发。
+ *
+ * <p><b>下发什么由 catalog 的存储类型决定。</b>本类只负责定位 catalog、
+ * 走缓存、把结果的过期时刻算出来；具体产出哪些键、密钥从哪一级配置取，
+ * 都交给 {@link StorageRuntimePolicy} 选定的 {@link StorageCredentialManager}。
+ * 这样 S3 / Azure / GCS 各自的键名与取值规则集中在一个类里，
+ * 不会因为这四种类型交织而把本类写成一张大分支表。
+ *
+ * <p><b>过期时刻来自缓存。</b>同一份凭据在有效期内被反复请求时，返回的是同一个
+ * 过期时刻，而不是「当前时间 + TTL」。差异在这里很实际：后者会让调用方以为
+ * 每次拿到的都是一份全新的、完整时长的凭据，而实际上密钥没变。
  */
 @Service
 @RequiredArgsConstructor
 public class CredentialService {
 
     private final TableLookup tableLookup;
-    private final RestServerProperties properties;
-    private final SecureRandom random = new SecureRandom();
+    private final CatalogRepository catalogRepository;
+    private final StorageRuntimePolicy storagePolicy;
+    private final StorageCredentialCache cache;
 
-    /** {@code GET .../tables/{table}/token}：签发数据访问令牌。 */
+    /** {@code GET .../tables/{table}/token}：签发数据访问凭据。 */
     @Transactional(readOnly = true)
     public TableDtos.GetTableDataTokenResponse token(String prefix, String database, String table) {
         TableEntity target = tableLookup.requireTable(prefix, database, table);
-        long expiresAt = System.currentTimeMillis() + properties.getCredential().getTtlSeconds() * 1000L;
+        CatalogEntity catalog = catalogRepository.findById(target.getCatalogId())
+                .orElseThrow(() -> ApiException.managementNotExist(ResourceType.CATALOG, prefix));
+        StorageConfigInfo storage = StorageConfigs.of(catalog);
 
-        Map<String, String> token = new LinkedHashMap<>();
-        token.put("accessKeyId", "PAIMON-" + target.getId());
-        token.put("accessKeySecret", randomSecret(24));
-        token.put("securityToken", randomSecret(48));
-        token.put("expiration", Instant.ofEpochMilli(expiresAt).toString());
-        if (target.getPath() != null) {
-            token.put("tablePath", target.getPath());
-        }
-        return new TableDtos.GetTableDataTokenResponse(token, expiresAt);
+        String key = StorageCredentialCache.key(catalog.getId(), storage, target.getPath());
+        long now = System.currentTimeMillis();
+        StorageCredentialCache.Cached cached = cache.get(key).orElseGet(() -> cache.put(key,
+                storagePolicy.credentialManager().vend(storage, target.getId(), target.getPath()), now));
+
+        return new TableDtos.GetTableDataTokenResponse(cached.credential().token(), cached.expiresAtMillis());
     }
 
     /**
@@ -80,11 +89,5 @@ public class CredentialService {
             }
         }
         return names;
-    }
-
-    private String randomSecret(int bytes) {
-        byte[] buffer = new byte[bytes];
-        random.nextBytes(buffer);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(buffer);
     }
 }

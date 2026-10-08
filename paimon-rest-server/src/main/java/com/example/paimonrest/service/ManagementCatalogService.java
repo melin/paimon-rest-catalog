@@ -60,6 +60,7 @@ public class ManagementCatalogService {
     private final ResourceGrantRepository resourceGrantRepository;
     private final DatabaseService databaseService;
     private final RestServerProperties properties;
+    private final StorageRuntimePolicy storagePolicy;
 
     /** {@code GET /catalogs}。 */
     @Transactional(readOnly = true)
@@ -196,6 +197,9 @@ public class ManagementCatalogService {
                 : requested;
         StorageConfigInfo normalized = StorageConfigs.normalize(supplied, properties.getDefaultWarehouse());
         StorageConfigs.validate(normalized);
+        // 存储类型是否可用是本部署的能力问题（装了哪个 FileIO），
+        // 与配置本身是否合法是两件事，因此分两步校验、分开报错
+        storagePolicy.requireSupported(normalized.storageType(), entity.getPrefix());
         StorageConfigs.apply(entity, normalized);
     }
 
