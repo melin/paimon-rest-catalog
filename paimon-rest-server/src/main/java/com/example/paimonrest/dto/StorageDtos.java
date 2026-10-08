@@ -25,6 +25,12 @@ import java.util.List;
  * {@link ManagementEnums.StorageType} 的对外取值一致，由
  * {@code StorageConfigDtosTests} 断言守住，防止改名时两侧漂移。
  *
+ * <p><b>两个非规格子类型。</b>{@code OBS} 与 {@code OSS} 不在 Polaris 规格的
+ * {@code discriminator.mapping} 里，是本工程为华为云 OBS 与阿里云 OSS 加的扩展，
+ * 理由见 {@link ManagementEnums.StorageType}。它们的字段刻意保持最小：
+ * 只接收凭据下发真正要用的定位信息（{@code endpoint}），密钥一律留在服务端配置里，
+ * 与 S3 子类型不接收密钥字段的处理保持一致。
+ *
  * <p><b>已废弃字段未建模。</b>{@code AwsStorageConfigInfo} 的 {@code currentKmsKey} 与
  * {@code allowedKmsKeys} 在规格里标了 {@code deprecated}，这里不接收也不返回，
  * 统一用 {@code encryptionKeys} / {@code decryptionKeys}。
@@ -42,6 +48,12 @@ public final class StorageDtos {
     /** 子类型注册名：Google Cloud Storage。 */
     static final String WIRE_GCS = "GCS";
 
+    /** 子类型注册名：华为云 OBS。非规格取值，本工程扩展。 */
+    static final String WIRE_OBS = "OBS";
+
+    /** 子类型注册名：阿里云 OSS。非规格取值，本工程扩展。 */
+    static final String WIRE_OSS = "OSS";
+
     /** 子类型注册名：本地文件系统。 */
     static final String WIRE_FILE = "FILE";
 
@@ -52,7 +64,7 @@ public final class StorageDtos {
      * {@code StorageConfigInfo}：按 {@code storageType} 判别的存储配置基类。
      *
      * <p>{@code allowedLocations} 与 {@code storageName} 是所有子类型共有的字段，
-     * 但 Java 的 record 不能继承字段，因此四个子类型各自声明一份。这是为换取
+     * 但 Java 的 record 不能继承字段，因此每个子类型各自声明一份。这是为换取
      * 「每种存储类型只暴露自己的字段」而付出的代价，由本类的测试守住一致性。
      */
     @JsonTypeInfo(use = JsonTypeInfo.Id.NAME,
@@ -62,10 +74,13 @@ public final class StorageDtos {
             @JsonSubTypes.Type(value = AwsStorageConfigInfo.class, name = WIRE_S3),
             @JsonSubTypes.Type(value = AzureStorageConfigInfo.class, name = WIRE_AZURE),
             @JsonSubTypes.Type(value = GcpStorageConfigInfo.class, name = WIRE_GCS),
+            @JsonSubTypes.Type(value = HuaweiObsStorageConfigInfo.class, name = WIRE_OBS),
+            @JsonSubTypes.Type(value = AliyunOssStorageConfigInfo.class, name = WIRE_OSS),
             @JsonSubTypes.Type(value = FileStorageConfigInfo.class, name = WIRE_FILE)
     })
     public sealed interface StorageConfigInfo
-            permits AwsStorageConfigInfo, AzureStorageConfigInfo, GcpStorageConfigInfo, FileStorageConfigInfo {
+            permits AwsStorageConfigInfo, AzureStorageConfigInfo, GcpStorageConfigInfo,
+                    HuaweiObsStorageConfigInfo, AliyunOssStorageConfigInfo, FileStorageConfigInfo {
 
         /** 该 catalog 允许写入的位置白名单；首项同时用作仓库根。 */
         List<String> allowedLocations();
@@ -131,6 +146,50 @@ public final class StorageDtos {
         @Override
         public ManagementEnums.StorageType storageType() {
             return ManagementEnums.StorageType.GCS;
+        }
+    }
+
+    /**
+     * 华为云 OBS。**非规格子类型，本工程扩展**（见 {@link ManagementEnums.StorageType}）。
+     *
+     * <p>字段与 {@link AliyunOssStorageConfigInfo} 当前完全相同，但没有合并成一个
+     * record：判别联合的成员身份由类型本身承担，合并后 {@code storageType()} 就无法
+     * 自证；且两家云的 FileIO 配置面并不一致（OBS 有 {@code fs.obs.security.provider}
+     * 凭据提供器，OSS 有服务端加密选项），后续任一侧新增字段时，合并的写法要被迫拆开。
+     *
+     * <p><b>没有 {@code region} 字段，是有意的。</b>华为云 OBSA 的配置表里不存在
+     * {@code fs.obs.region} 这一项——区域信息已经包含在 {@code endpoint} 里
+     * （形如 {@code obs.cn-north-4.myhuaweicloud.com}）。造一个下发后无人识别的键，
+     * 比不给更容易误导：运维会以为填了就生效。
+     */
+    public record HuaweiObsStorageConfigInfo(List<String> allowedLocations,
+                                             String storageName,
+                                             String endpoint,
+                                             Boolean stsUnavailable)
+            implements StorageConfigInfo {
+
+        @Override
+        public ManagementEnums.StorageType storageType() {
+            return ManagementEnums.StorageType.OBS;
+        }
+    }
+
+    /**
+     * 阿里云 OSS。**非规格子类型，本工程扩展**（见 {@link ManagementEnums.StorageType}）。
+     *
+     * <p>没有 {@code region} 字段的理由同 {@link HuaweiObsStorageConfigInfo}：
+     * Hadoop 的 aliyun-oss 官方配置表里只有 {@code fs.oss.endpoint} 与两个密钥项，
+     * 区域由 endpoint 表达（形如 {@code oss-cn-hangzhou.aliyuncs.com}）。
+     */
+    public record AliyunOssStorageConfigInfo(List<String> allowedLocations,
+                                             String storageName,
+                                             String endpoint,
+                                             Boolean stsUnavailable)
+            implements StorageConfigInfo {
+
+        @Override
+        public ManagementEnums.StorageType storageType() {
+            return ManagementEnums.StorageType.OSS;
         }
     }
 

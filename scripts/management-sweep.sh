@@ -64,7 +64,7 @@ ok 200 "PUT    /catalogs/mgmt storageConfigInfo 更新仓库" -X PUT -H "$J" \
 echo "     管理面改过的仓库应同步到 catalog 面："
 ok 200 "GET    /v1/mgmt 侧的 catalog 发现" "$B/v1/config?warehouse=mgmt"
 
-echo "========== 1b. storageConfigInfo 四种存储类型 =========="
+echo "========== 1b. storageConfigInfo 六种存储类型 =========="
 ok 201 "POST   /catalogs (S3 全字段)" -X POST -H "$J" -d '{
   "catalog":{"type":"INTERNAL","name":"s3-demo","properties":{"owner":"qa"},
    "storageConfigInfo":{"storageType":"S3","allowedLocations":["s3://analytics-bucket/warehouse/"],
@@ -101,6 +101,35 @@ ok 201 "POST   /catalogs (GCS 全字段)" -X POST -H "$J" -d '{
   "catalog":{"type":"INTERNAL","name":"gcs-demo","properties":{},
    "storageConfigInfo":{"storageType":"GCS","allowedLocations":["gs://demo-lake/warehouse/"],
      "gcsServiceAccount":"{\"type\":\"service_account\",\"project_id\":\"demo\"}"}}}' "$M/catalogs"
+# OBS / OSS 是本工程超出规格的扩展取值，单独验一遍：它们最容易出的错是
+# 「被当成 S3 兼容存储而放行其它类型的字段」，所以除了回读，还要断言不串族。
+ok 201 "POST   /catalogs (OBS 全字段)" -X POST -H "$J" -d '{
+  "catalog":{"type":"INTERNAL","name":"obs-demo","properties":{},
+   "storageConfigInfo":{"storageType":"OBS","allowedLocations":["obs://analytics-bucket/warehouse/"],
+     "endpoint":"obs.cn-north-4.myhuaweicloud.com","stsUnavailable":false}}}' "$M/catalogs"
+OBS_JSON=$(curl -s --noproxy '*' "$M/catalogs/obs-demo")
+for pat in '"storageType":"OBS"' 'obs.cn-north-4.myhuaweicloud.com'; do
+  case "$OBS_JSON" in
+    *"$pat"*) pass=$((pass + 1)); printf 'ok  %s\n' "[--/--] OBS 回读含 $pat" ;;
+    *) fail=$((fail + 1)); printf '!!  %s\n' "[--/--] OBS 回读缺 $pat -> $OBS_JSON" ;;
+  esac
+done
+case "$OBS_JSON" in
+  *'"accessKeyId"'*|*'"tenantId"'*|*'"roleArn"'*)
+    fail=$((fail + 1)); printf '!!  %s\n' "[--/--] OBS 配置不应带出其它类型字段 -> $OBS_JSON" ;;
+  *) pass=$((pass + 1)); printf 'ok  %s\n' "[--/--] OBS 配置不带其它类型字段" ;;
+esac
+ok 201 "POST   /catalogs (OSS 全字段)" -X POST -H "$J" -d '{
+  "catalog":{"type":"INTERNAL","name":"oss-demo","properties":{},
+   "storageConfigInfo":{"storageType":"OSS","allowedLocations":["oss://analytics-bucket/warehouse/"],
+     "endpoint":"oss-cn-hangzhou.aliyuncs.com"}}}' "$M/catalogs"
+OSS_JSON=$(curl -s --noproxy '*' "$M/catalogs/oss-demo")
+for pat in '"storageType":"OSS"' 'oss-cn-hangzhou.aliyuncs.com'; do
+  case "$OSS_JSON" in
+    *"$pat"*) pass=$((pass + 1)); printf 'ok  %s\n' "[--/--] OSS 回读含 $pat" ;;
+    *) fail=$((fail + 1)); printf '!!  %s\n' "[--/--] OSS 回读缺 $pat -> $OSS_JSON" ;;
+  esac
+done
 ok 400 "POST   /catalogs allowedLocations 含空串 -> 400" -X POST -H "$J" -d '{
   "catalog":{"type":"INTERNAL","name":"blank-loc","properties":{},
    "storageConfigInfo":{"storageType":"FILE","allowedLocations":["file:///tmp/ok","   "]}}}' "$M/catalogs"
@@ -123,6 +152,8 @@ esac
 ok 204 "DELETE /catalogs/s3-demo" -X DELETE "$M/catalogs/s3-demo"
 ok 204 "DELETE /catalogs/az-demo" -X DELETE "$M/catalogs/az-demo"
 ok 204 "DELETE /catalogs/gcs-demo" -X DELETE "$M/catalogs/gcs-demo"
+ok 204 "DELETE /catalogs/obs-demo" -X DELETE "$M/catalogs/obs-demo"
+ok 204 "DELETE /catalogs/oss-demo" -X DELETE "$M/catalogs/oss-demo"
 
 echo "========== 2. principals（8 个 operation） =========="
 ok 201 "POST   /principals (alice)" -X POST -H "$J" \

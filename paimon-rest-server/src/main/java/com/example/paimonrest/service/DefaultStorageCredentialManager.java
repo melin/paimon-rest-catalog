@@ -1,10 +1,12 @@
 package com.example.paimonrest.service;
 
 import com.example.paimonrest.config.RestServerProperties;
+import com.example.paimonrest.dto.StorageDtos.AliyunOssStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.AwsStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.AzureStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.FileStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.GcpStorageConfigInfo;
+import com.example.paimonrest.dto.StorageDtos.HuaweiObsStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.StorageConfigInfo;
 import com.example.paimonrest.support.ApiException;
 import com.example.paimonrest.support.CredentialManagerType;
@@ -30,6 +32,15 @@ import org.springframework.stereotype.Component;
  * S3 用 {@code s3.*}，GCS 用 {@code gcs.oauth2.*}，本地文件系统无凭据。
  * 键名写错不会报错，只会让引擎静默地拿不到凭据——因此每种类型都配了测试，
  * 断言的是键名本身，而不是「调用了没抛异常」。
+ *
+ * <p><b>OBS 与 OSS 的键名族不能互相套用。</b>两家云的对象存储都兼容 S3 协议，
+ * 容易以为用 {@code s3.*} 或对方的键名都能跑通，实际不行：Paimon 的
+ * {@code paimon-obs} 与 {@code paimon-oss} 是两个独立的 FileIO，各认自己的一套键，
+ * 而且两套的命名风格还不一致——华为是点分隔小写的
+ * {@code fs.obs.access.key} / {@code fs.obs.secret.key} / {@code fs.obs.session.token}，
+ * 阿里是驼峰的 {@code fs.oss.accessKeyId} / {@code fs.oss.accessKeySecret} /
+ * {@code fs.oss.securityToken}。就连「临时凭据的令牌」这个东西，两边都不同名。
+ * 这层差异在 {@link #OBS_KEYS} 与 {@link #OSS_KEYS} 里集中表达，便于对照。
  *
  * <p><b>刻意不下发的字段。</b>{@code AwsStorageConfigInfo} 的
  * {@code endpointInternal} 与 {@code stsEndpoint} 是服务端自己访问对象存储时用的地址，
@@ -66,6 +77,24 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
 
     private static final String KEY_GCS_TOKEN = "gcs.oauth2.token";
 
+    /**
+     * 华为云 OBS 的凭据键名族，取自 OBSA（{@code hadoop-huaweicloud}）的配置项。
+     *
+     * <p>{@code session.token} 是临时 AK/SK 配套的安全令牌，不是 {@code security.token}——
+     * 华为与阿里的命名不同，写错了不会报错，只会让引擎在临时凭据场景下签名失败。
+     */
+    private static final KeyFamily OBS_KEYS = new KeyFamily(
+            "fs.obs.access.key", "fs.obs.secret.key", "fs.obs.session.token", "fs.obs.endpoint");
+
+    /**
+     * 阿里云 OSS 的凭据键名族，取自 {@code hadoop-aliyun} 的配置项。
+     *
+     * <p>注意 {@code accessKeyId} / {@code accessKeySecret} 是驼峰，与 OBS 的点分隔小写
+     * 不是同一套风格；临时凭据的键也不同（{@code securityToken} 对 {@code session.token}）。
+     */
+    private static final KeyFamily OSS_KEYS = new KeyFamily(
+            "fs.oss.accessKeyId", "fs.oss.accessKeySecret", "fs.oss.securityToken", "fs.oss.endpoint");
+
     private final RestServerProperties properties;
 
     private final SecureRandom random = new SecureRandom();
@@ -86,12 +115,18 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
             case S3 -> s3((AwsStorageConfigInfo) storage, token);
             case AZURE -> azure((AzureStorageConfigInfo) storage, token);
             case GCS -> gcs((GcpStorageConfigInfo) storage, token);
+            case OBS -> obs((HuaweiObsStorageConfigInfo) storage, token);
+            case OSS -> oss((AliyunOssStorageConfigInfo) storage, token);
             case FILE -> file((FileStorageConfigInfo) storage, tableId, tablePath, token);
         };
         VendedStorageCredential vended =
                 new VendedStorageCredential(token, ttlSeconds(storage), storage.storageType(), source);
         log.debug("vended {} credentials for table {} from {}", storage.storageType(), tableId, source);
         return vended;
+    }
+
+    /** 一个对象存储 FileIO 的凭据键名族。四个键里只有前三个是密钥，最后一个只是定位。 */
+    record KeyFamily(String accessKey, String secretKey, String sessionToken, String endpoint) {
     }
 
     // ------------------------------------------------------------------ S3
@@ -106,54 +141,119 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
      * 一个拼错的配置不该带来权限扩大。
      */
     private String s3(AwsStorageConfigInfo s3, Map<String, String> token) {
-        String source = VendedStorageCredential.SOURCE_ENVIRONMENT;
-        boolean vendsSecrets = !Boolean.TRUE.equals(s3.stsUnavailable());
-
-        if (!vendsSecrets) {
-            source = VendedStorageCredential.SOURCE_STS_UNAVAILABLE;
-        } else {
-            RestServerProperties.Storage.Aws aws = properties.getStorage().getAws();
-            RestServerProperties.Storage.Keys keys = namedKeys(aws, s3.storageName());
-            if (keys != null) {
-                source = VendedStorageCredential.SOURCE_NAMED_STORAGE_PREFIX + s3.storageName();
-            } else if (aws.getAccessKey() != null && !aws.getAccessKey().isBlank()
-                    && aws.getSecretKey() != null && !aws.getSecretKey().isBlank()) {
-                keys = new RestServerProperties.Storage.Keys();
-                keys.setAccessKey(aws.getAccessKey());
-                keys.setSecretKey(aws.getSecretKey());
-                source = VendedStorageCredential.SOURCE_CONFIGURATION;
-            }
-            if (keys != null) {
-                token.put(KEY_S3_ACCESS, keys.getAccessKey());
-                token.put(KEY_S3_SECRET, keys.getSecretKey());
-            }
-        }
-
         // 定位配置与密钥有无无关：即使不下发密钥，引擎也需要知道该连哪里
         putIfPresent(token, "s3.region", s3.region());
         putIfPresent(token, "s3.endpoint", s3.endpoint());
         if (s3.pathStyleAccess() != null) {
             token.put("s3.path-style-access", s3.pathStyleAccess().toString());
         }
-        return source;
+        if (Boolean.TRUE.equals(s3.stsUnavailable())) {
+            return VendedStorageCredential.SOURCE_STS_UNAVAILABLE;
+        }
+
+        RestServerProperties.Storage.Aws aws = properties.getStorage().getAws();
+        RestServerProperties.Storage.Keys named = namedKeys(aws.getStorages(), s3.storageName(), "aws");
+        if (named != null) {
+            token.put(KEY_S3_ACCESS, named.getAccessKey());
+            token.put(KEY_S3_SECRET, named.getSecretKey());
+            return VendedStorageCredential.SOURCE_NAMED_STORAGE_PREFIX + s3.storageName();
+        }
+        if (configured(aws.getAccessKey(), aws.getSecretKey())) {
+            token.put(KEY_S3_ACCESS, aws.getAccessKey());
+            token.put(KEY_S3_SECRET, aws.getSecretKey());
+            return VendedStorageCredential.SOURCE_CONFIGURATION;
+        }
+        return VendedStorageCredential.SOURCE_ENVIRONMENT;
+    }
+
+    // ------------------------------------------------------------------ OBS / OSS
+
+    /**
+     * 华为云 OBS：端点照发，密钥按三级来源取。
+     *
+     * <p>端点放在前面且不受密钥来源影响：即使服务端没有任何 OBS 凭据，
+     * 引擎也需要知道连哪个端点——它可能用自己的 ECS 委托身份或
+     * {@code fs.obs.security.provider} 去取凭据。
+     */
+    private String obs(HuaweiObsStorageConfigInfo obs, Map<String, String> token) {
+        putIfPresent(token, OBS_KEYS.endpoint(), obs.endpoint());
+        if (Boolean.TRUE.equals(obs.stsUnavailable())) {
+            return VendedStorageCredential.SOURCE_STS_UNAVAILABLE;
+        }
+        return objectStoreSecrets("obs", properties.getStorage().getObs(), obs.storageName(), OBS_KEYS, token);
+    }
+
+    /** 阿里云 OSS：处理与 {@link #obs} 相同，只是键名族换成 {@link #OSS_KEYS}。 */
+    private String oss(AliyunOssStorageConfigInfo oss, Map<String, String> token) {
+        putIfPresent(token, OSS_KEYS.endpoint(), oss.endpoint());
+        if (Boolean.TRUE.equals(oss.stsUnavailable())) {
+            return VendedStorageCredential.SOURCE_STS_UNAVAILABLE;
+        }
+        return objectStoreSecrets("oss", properties.getStorage().getOss(), oss.storageName(), OSS_KEYS, token);
+    }
+
+    /**
+     * OBS / OSS 共用的三级凭据来源：具名存储 → 默认配置 → 环境凭据链。
+     *
+     * <p>与 S3 同构，包括「具名存储找不到时失败而非退回默认」这条取舍。
+     *
+     * <p>临时凭据（{@code sessionToken}）跟着它所属的那一级一起下发：具名存储里配了
+     * 令牌就用那个，否则用默认配置的。混搭（具名存储的 AK/SK 配默认配置的令牌）
+     * 没有任何合理场景——临时凭据的 AK、SK、令牌是一次签发的同一组。
+     */
+    private String objectStoreSecrets(String group,
+                                      RestServerProperties.Storage.CloudCredentials credentials,
+                                      String storageName,
+                                      KeyFamily keys,
+                                      Map<String, String> token) {
+        RestServerProperties.Storage.Keys named = namedKeys(credentials.getStorages(), storageName, group);
+        if (named != null) {
+            putSecrets(token, keys, named.getAccessKey(), named.getSecretKey(), named.getSessionToken());
+            return VendedStorageCredential.SOURCE_NAMED_STORAGE_PREFIX + storageName;
+        }
+        if (configured(credentials.getAccessKey(), credentials.getSecretKey())) {
+            putSecrets(token, keys, credentials.getAccessKey(), credentials.getSecretKey(),
+                    credentials.getSessionToken());
+            return VendedStorageCredential.SOURCE_CONFIGURATION;
+        }
+        return VendedStorageCredential.SOURCE_ENVIRONMENT;
+    }
+
+    /** 写入一组密钥；安全令牌只在非空时写入，长期凭据没有它。 */
+    private static void putSecrets(Map<String, String> token,
+                                   KeyFamily keys,
+                                   String accessKey,
+                                   String secretKey,
+                                   String sessionToken) {
+        token.put(keys.accessKey(), accessKey);
+        token.put(keys.secretKey(), secretKey);
+        putIfPresent(token, keys.sessionToken(), sessionToken);
     }
 
     /**
      * 取出具名存储的密钥。
      *
+     * @param group 配置组名，仅用于拼错误信息（{@code aws} / {@code obs} / {@code oss}）
      * @throws ApiException 500 catalog 引用了配置里不存在的具名存储
      */
-    private RestServerProperties.Storage.Keys namedKeys(RestServerProperties.Storage.Aws aws, String storageName) {
+    private RestServerProperties.Storage.Keys namedKeys(Map<String, RestServerProperties.Storage.Keys> storages,
+                                                        String storageName,
+                                                        String group) {
         if (storageName == null || storageName.isBlank()) {
             return null;
         }
-        RestServerProperties.Storage.Keys keys = aws.getStorages().get(storageName);
+        RestServerProperties.Storage.Keys keys = storages.get(storageName);
         if (keys == null || keys.getAccessKey() == null || keys.getAccessKey().isBlank()) {
             throw new ApiException(500, null, null,
                     "catalog references storageName '" + storageName
-                            + "' but paimon.rest.storage.aws.storages has no such entry");
+                            + "' but paimon.rest.storage." + group + ".storages has no such entry");
         }
         return keys;
+    }
+
+    private static boolean configured(String accessKey, String secretKey) {
+        return accessKey != null && !accessKey.isBlank()
+                && secretKey != null && !secretKey.isBlank();
     }
 
     // ------------------------------------------------------------------ Azure

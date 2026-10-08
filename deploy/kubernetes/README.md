@@ -123,7 +123,7 @@ warehouse 用的是 `file://` 加 `ReadWriteOnce` 卷。扩到 2 个副本后，
 要么调度不到有卷的节点，要么在不同节点上各挂一份不同的数据——后者的表现是
 「建的表时有时无」，取决于请求落到哪个 Pod。
 
-**要横向扩展，必须先把仓库换成对象存储**（S3 / Azure Blob / GCS）。
+**要横向扩展，必须先把仓库换成对象存储**（S3 / Azure Blob / GCS / 华为云 OBS / 阿里云 OSS）。
 服务端已支持这几种存储类型，换成 `s3://...` 之后不再需要 `warehouse-pvc.yaml`，
 多副本也就没有共享问题。同时 PDB 应从 `maxUnavailable: 1` 改成
 `minAvailable: 1`，Service 不需要做会话保持。

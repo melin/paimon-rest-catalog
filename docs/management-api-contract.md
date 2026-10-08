@@ -188,6 +188,8 @@
 | `AwsStorageConfigInfo` | `StorageConfigInfo` | `roleArn`: string; `externalId`: string; `userArn`: string; `currentKmsKey`: string; `allowedKmsKeys`: array<string>; `encryptionKeys`: array<string>; `decryptionKeys`: array<string>; `region`: string; `endpoint`: string; `stsEndpoint`: string; `stsUnavailable`: boolean; `endpointInternal`: string; `pathStyleAccess`: boolean; `kmsUnavailable`: boolean |
 | `AzureStorageConfigInfo` | `StorageConfigInfo` | `tenantId` \*: string; `multiTenantAppName`: string; `consentUrl`: string; `hierarchical`: boolean |
 | `GcpStorageConfigInfo` | `StorageConfigInfo` | `gcsServiceAccount`: string |
+| `HuaweiObsStorageConfigInfo` | `StorageConfigInfo` | `endpoint`: string; `stsUnavailable`: boolean — **非规格子类型，本工程扩展** |
+| `AliyunOssStorageConfigInfo` | `StorageConfigInfo` | `endpoint`: string; `stsUnavailable`: boolean — **非规格子类型，本工程扩展** |
 | `FileStorageConfigInfo` | `StorageConfigInfo` | — |
 | `ConnectionConfigInfo` | — | `connectionType` \*: enum(`ICEBERG_REST`, `HADOOP`, `HIVE`, `BIGQUERY`); `uri`: string; `authenticationParameters`: `AuthenticationParameters`; `serviceIdentity`: `ServiceIdentityInfo`; `properties`: object |
 | `AuthenticationParameters` | — | `authenticationType` \*: enum(`OAUTH`, `BEARER`, `SIGV4`, `IMPLICIT`, `GCP`) |
@@ -196,9 +198,13 @@
 `ConnectionConfigInfo.connectionType` 是外部连接实现的判别字段
 （`ICEBERG_REST` / `HADOOP` / `HIVE` / `BIGQUERY`）。
 
-四种存储配置均已实现：`S3` / `AZURE` / `GCS` 的类型专属字段会原样保存并回读，
+上表 `StorageConfigInfo` 一行的 `enum` 是**规格原文**，只列规格声明的四个取值。
+本实现另外支持 `OBS`（华为云）与 `OSS`（阿里云），它们是扩展而非规格内容，
+因此不混进那一行——表格与规格保持可机械核对的一致，差异集中记在下方取舍里。
+
+**六种存储配置均已实现**：`S3` / `AZURE` / `GCS` 的类型专属字段会原样保存并回读，
 `AZURE` 的 `tenantId` 按其 `required` 校验（缺失返回 400）。
-三点实现取舍：
+四点实现取舍：
 
 - `AwsStorageConfigInfo` 中已废弃的 `currentKmsKey` / `allowedKmsKeys` 不接收也不返回，
   统一用 `encryptionKeys` / `decryptionKeys`；传入会被静默忽略。
@@ -206,6 +212,13 @@
   而不是报 400——全站都依赖 Spring 默认的宽松绑定，单独收紧会造成行为不一致。
 - `PUT /catalogs/{catalogName}` 的 `storageConfigInfo` 是**整体替换**：
   请求里未出现的类型专属字段会被清空，不是「保持不变」。
+- `OBS` / `OSS` 两个取值超出规格的 `enum`，是本工程为华为云 OBS 与阿里云 OSS 加的扩展。
+  规格把这两家云归入「兼容 S3 协议的对象存储」，靠自定义 `endpoint` 接入；
+  单列它们是为了让凭据下发产出厂商原生的 `fs.obs.*` / `fs.oss.*` 键族——这两套键与 `s3.*`
+  互不通用，混用会静默失效。**影响面仅限管理 API 的按类型分派逻辑**：引擎只是把
+  `storageConfigInfo` 原样透传，不解析 `storageType`，因此 REST Catalog 协议不受影响。
+  两个子类型的 `endpoint` 都不是必填项：判断依据是引擎侧是否已在 `core-site.xml` 里
+  配好对应端点，服务端无从得知，硬判会把合法配置拒之门外。
 
 `ConnectionConfigInfo` 仍只按 Iceberg REST 形态处理。
 

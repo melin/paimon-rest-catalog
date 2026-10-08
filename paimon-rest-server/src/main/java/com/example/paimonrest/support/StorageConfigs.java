@@ -2,10 +2,12 @@ package com.example.paimonrest.support;
 
 import com.example.paimonrest.domain.entity.CatalogEntity;
 import com.example.paimonrest.dto.ManagementEnums.StorageType;
+import com.example.paimonrest.dto.StorageDtos.AliyunOssStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.AwsStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.AzureStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.FileStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.GcpStorageConfigInfo;
+import com.example.paimonrest.dto.StorageDtos.HuaweiObsStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.StorageConfigInfo;
 import java.util.ArrayList;
 import java.util.List;
@@ -15,7 +17,13 @@ import java.util.List;
  *
  * <p>判别联合的「按类型校验」只能写在 Java 侧：规格里只有
  * {@code AzureStorageConfigInfo} 声明了 {@code required: [tenantId]}，
- * 其余三种都没有必填字段，这一点用注解表达不了。
+ * 其余五种都没有必填字段，这一点用注解表达不了。
+ *
+ * <p><b>OBS / OSS 的 {@code endpoint} 不设为必填。</b>它落空时引擎会需要一个端点，
+ * 看起来像该拦下来的配置错误，但服务端无从判断引擎侧是否已经在
+ * {@code core-site.xml} 里配好了 {@code fs.obs.endpoint}——这是常见部署形态。
+ * 硬判会把合法配置拒之门外，与下面对 {@code allowedLocations} 前缀的处理同一个取舍：
+ * 服务端只拒绝它确知非法的输入。
  *
  * <p>刻意**不**校验 {@code allowedLocations} 的 URI 前缀。规格里
  * {@code s3://} / {@code abfss://} / {@code gs://} 是 example 而不是约束，
@@ -133,6 +141,8 @@ public final class StorageConfigs {
                     null, null, null, null, null, null, null, null, null);
             case AZURE -> new AzureStorageConfigInfo(locations, null, null, null, null, null);
             case GCS -> new GcpStorageConfigInfo(locations, null, null);
+            case OBS -> new HuaweiObsStorageConfigInfo(locations, null, null, null);
+            case OSS -> new AliyunOssStorageConfigInfo(locations, null, null, null);
             case FILE -> new FileStorageConfigInfo(locations, null);
         };
     }
@@ -173,6 +183,14 @@ public final class StorageConfigs {
         }
         if (info instanceof GcpStorageConfigInfo gcs) {
             return new GcpStorageConfigInfo(locations, storageName, gcs.gcsServiceAccount());
+        }
+        if (info instanceof HuaweiObsStorageConfigInfo obs) {
+            return new HuaweiObsStorageConfigInfo(locations, storageName,
+                    obs.endpoint(), obs.stsUnavailable());
+        }
+        if (info instanceof AliyunOssStorageConfigInfo oss) {
+            return new AliyunOssStorageConfigInfo(locations, storageName,
+                    oss.endpoint(), oss.stsUnavailable());
         }
         if (info instanceof FileStorageConfigInfo) {
             return new FileStorageConfigInfo(locations, storageName);

@@ -31,11 +31,27 @@ public final class ManagementEnums {
         }
     }
 
-    /** 管理规格 {@code StorageConfigInfo.storageType}。 */
+    /**
+     * 管理规格 {@code StorageConfigInfo.storageType}。
+     *
+     * <p><b>{@code OBS} 与 {@code OSS} 是本工程的扩展，不在 Polaris 规格里。</b>
+     * 规格的这一处 {@code enum} 只有 {@code S3 / GCS / AZURE / FILE} 四个取值，
+     * 因为 Polaris 把华为云与阿里云都归入「兼容 S3 协议的对象存储」，
+     * 靠自定义 {@code endpoint} 接入。这里单列两个取值，是为了让凭据下发能产出
+     * 厂商原生的键族（{@code fs.obs.*} / {@code fs.oss.*}）——这两套键与
+     * {@code s3.*} 并不通用，混用会静默失效。
+     *
+     * <p>代价是 {@code storageType} 的取值集合超出规格。影响面仅限管理 API 的
+     * 「按类型分派」逻辑：客户端（引擎）只是把 {@code storageConfigInfo} 原样透传，
+     * 不解析这个字段，因此不破坏 REST Catalog 协议。取舍记在
+     * {@code docs/management-api-contract.md}。
+     */
     public enum StorageType {
         S3,
         GCS,
         AZURE,
+        OBS,
+        OSS,
         FILE;
 
         public static Optional<StorageType> parse(String value) {

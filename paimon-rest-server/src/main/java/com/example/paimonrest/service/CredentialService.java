@@ -28,8 +28,8 @@ import org.springframework.transaction.annotation.Transactional;
  * <p><b>下发什么由 catalog 的存储类型决定。</b>本类只负责定位 catalog、
  * 走缓存、把结果的过期时刻算出来；具体产出哪些键、密钥从哪一级配置取，
  * 都交给 {@link StorageRuntimePolicy} 选定的 {@link StorageCredentialManager}。
- * 这样 S3 / Azure / GCS 各自的键名与取值规则集中在一个类里，
- * 不会因为这四种类型交织而把本类写成一张大分支表。
+ * 这样各存储类型（S3 / Azure / GCS / OBS / OSS / FILE）的键名与取值规则集中在一个类里，
+ * 不会因为类型变多而把本类写成一张大分支表。
  *
  * <p><b>过期时刻来自缓存。</b>同一份凭据在有效期内被反复请求时，返回的是同一个
  * 过期时刻，而不是「当前时间 + TTL」。差异在这里很实际：后者会让调用方以为

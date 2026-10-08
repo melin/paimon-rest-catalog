@@ -13,7 +13,8 @@
 # 取决于请求落到了哪个 Pod，排查成本极高。
 #
 # 所以本清单固定 replicas: 1。
-# 要让服务端横向扩展，必须把仓库换成对象存储——服务端已支持 S3 / Azure Blob / GCS
+# 要让服务端横向扩展，必须把仓库换成对象存储——服务端已支持 S3 / Azure Blob /
+# GCS / 华为云 OBS / 阿里云 OSS
 # （见 README「配置项」与 docs/management-api-contract.md 的 storageConfigInfo），
 # 换成 s3://... 之后不再需要这个 PVC，多副本也就没有共享问题。
 #

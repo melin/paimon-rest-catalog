@@ -20,12 +20,18 @@ import java.util.stream.Collectors;
  * 报错会推迟到引擎真正读写数据的那一刻，且现象是引擎侧的文件系统异常，
  * 没人会去怀疑是 catalog 建错了。这里前移到创建/修改 catalog 时拒绝。
  *
+ * <p><b>取值超出 Polaris 的两个。</b>{@code polaris.file-io.type} 的取值是 Polaris
+ * 内置实现标识，没有 {@code obs} / {@code oss}——Polaris 用 S3 兼容层接入这两家云。
+ * 这里单列它们，是为了与 {@link StorageType#OBS} / {@link StorageType#OSS}
+ * 这两个扩展存储类型对齐：不放开的话，建 OBS catalog 会被
+ * {@link #supports} 拒掉。
+ *
  * <p>{@code FILE} 在所有取值下都可用：规格注明它仅供测试，本地部署与
  * 端到端脚本都依赖它，把它一起关掉会让「只想限制云存储」的部署失去退路。
  */
 public enum FileIoType {
 
-    /** 全部四种存储类型。 */
+    /** 全部六种存储类型。 */
     DEFAULT("default", EnumSet.allOf(StorageType.class)),
 
     /** 本地文件系统与 S3（含任何兼容 S3 协议的对象存储）。 */
@@ -36,6 +42,12 @@ public enum FileIoType {
 
     /** 本地文件系统与 Google Cloud Storage。 */
     GCS("gcs", EnumSet.of(StorageType.FILE, StorageType.GCS)),
+
+    /** 本地文件系统与华为云 OBS。 */
+    OBS("obs", EnumSet.of(StorageType.FILE, StorageType.OBS)),
+
+    /** 本地文件系统与阿里云 OSS。 */
+    OSS("oss", EnumSet.of(StorageType.FILE, StorageType.OSS)),
 
     /** 仅本地文件系统。 */
     LOCAL("local", EnumSet.of(StorageType.FILE));

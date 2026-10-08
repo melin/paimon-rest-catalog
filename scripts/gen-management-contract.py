@@ -204,9 +204,24 @@ w("### 3.4 catalog 与存储配置")
 w("")
 w("| schema | 父类 | 字段 |")
 w("| --- | --- | --- |")
+# OBS / OSS 两个子类型不在规格里（规格把这两家云归入 S3 兼容存储，靠自定义 endpoint 接入），
+# 字段在这里显式声明——这是全文唯一一处「表格内容不来自规格」的地方。
+# 必须与 StorageDtos 的 HuaweiObsStorageConfigInfo / AliyunOssStorageConfigInfo 保持一致；
+# 改动那两个 record 时同步这里，否则文档会与实现脱节。
+EXTENSION_SCHEMAS = {
+    "HuaweiObsStorageConfigInfo": {"endpoint": "string", "stsUnavailable": "boolean"},
+    "AliyunOssStorageConfigInfo": {"endpoint": "string", "stsUnavailable": "boolean"},
+}
+EXTENSION_NOTE = " — **非规格子类型，本工程扩展**"
 for name in ["Catalog", "PolarisCatalog", "ExternalCatalog", "StorageConfigInfo", "AwsStorageConfigInfo",
-             "AzureStorageConfigInfo", "GcpStorageConfigInfo", "FileStorageConfigInfo",
+             "AzureStorageConfigInfo", "GcpStorageConfigInfo",
+             "HuaweiObsStorageConfigInfo", "AliyunOssStorageConfigInfo",
+             "FileStorageConfigInfo",
              "ConnectionConfigInfo", "AuthenticationParameters"]:
+    if name in EXTENSION_SCHEMAS:
+        cells = [f"`{k}`: {v}" for k, v in EXTENSION_SCHEMAS[name].items()]
+        w(f"| `{name}` | `StorageConfigInfo` | {'; '.join(cells)}{EXTENSION_NOTE} |")
+        continue
     parents, props, required = props_of(name)
     cells = []
     for k, v in props.items():
@@ -218,9 +233,13 @@ w("`StorageConfigInfo.storageType` 是存储实现的判别字段（`S3` / `GCS`
 w("`ConnectionConfigInfo.connectionType` 是外部连接实现的判别字段")
 w("（`ICEBERG_REST` / `HADOOP` / `HIVE` / `BIGQUERY`）。")
 w("")
-w("四种存储配置均已实现：`S3` / `AZURE` / `GCS` 的类型专属字段会原样保存并回读，")
+w("上表 `StorageConfigInfo` 一行的 `enum` 是**规格原文**，只列规格声明的四个取值。")
+w("本实现另外支持 `OBS`（华为云）与 `OSS`（阿里云），它们是扩展而非规格内容，")
+w("因此不混进那一行——表格与规格保持可机械核对的一致，差异集中记在下方取舍里。")
+w("")
+w("**六种存储配置均已实现**：`S3` / `AZURE` / `GCS` 的类型专属字段会原样保存并回读，")
 w("`AZURE` 的 `tenantId` 按其 `required` 校验（缺失返回 400）。")
-w("三点实现取舍：")
+w("四点实现取舍：")
 w("")
 w("- `AwsStorageConfigInfo` 中已废弃的 `currentKmsKey` / `allowedKmsKeys` 不接收也不返回，")
 w("  统一用 `encryptionKeys` / `decryptionKeys`；传入会被静默忽略。")
@@ -228,6 +247,13 @@ w("- 落在本类型之外的字段（例如 `storageType` 为 `FILE` 却带 `ro
 w("  而不是报 400——全站都依赖 Spring 默认的宽松绑定，单独收紧会造成行为不一致。")
 w("- `PUT /catalogs/{catalogName}` 的 `storageConfigInfo` 是**整体替换**：")
 w("  请求里未出现的类型专属字段会被清空，不是「保持不变」。")
+w("- `OBS` / `OSS` 两个取值超出规格的 `enum`，是本工程为华为云 OBS 与阿里云 OSS 加的扩展。")
+w("  规格把这两家云归入「兼容 S3 协议的对象存储」，靠自定义 `endpoint` 接入；")
+w("  单列它们是为了让凭据下发产出厂商原生的 `fs.obs.*` / `fs.oss.*` 键族——这两套键与 `s3.*`")
+w("  互不通用，混用会静默失效。**影响面仅限管理 API 的按类型分派逻辑**：引擎只是把")
+w("  `storageConfigInfo` 原样透传，不解析 `storageType`，因此 REST Catalog 协议不受影响。")
+w("  两个子类型的 `endpoint` 都不是必填项：判断依据是引擎侧是否已在 `core-site.xml` 里")
+w("  配好对应端点，服务端无从得知，硬判会把合法配置拒之门外。")
 w("")
 w("`ConnectionConfigInfo` 仍只按 Iceberg REST 形态处理。")
 w("")

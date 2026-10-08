@@ -390,10 +390,14 @@ ERROR 1071 (42000): Specified key was too long; max key length is 3072 bytes
 - **规格遗漏**：`GET /catalogs/{name}/catalog-roles` 与
   `GET /catalogs/{name}/catalog-roles/{role}/grants` 在规格中只声明了 `200`，
   没有 `403` / `404`；本实现按失败关闭处理，仍要求 `CATALOG_MANAGE_ACCESS`。
-- **存储配置支持四种类型**。`storageConfigInfo` 在规格里是按 `storageType` 判别的联合，
-  因此 Java 侧也按子类型建模（`S3` / `AZURE` / `GCS` / `FILE` 各有自己的字段集合），
+- **存储配置支持六种类型**。`storageConfigInfo` 在规格里是按 `storageType` 判别的联合，
+  因此 Java 侧也按子类型建模（`S3` / `AZURE` / `GCS` / `OBS` / `OSS` / `FILE` 各有自己的字段集合），
   非法组合在类型层面就不成立。`AZURE` 的 `tenantId` 按规格的 `required` 校验（缺失返回 400）；
   `S3` 的废弃字段 `currentKmsKey` / `allowedKmsKeys` 不接收也不返回。
+  其中 `OBS`（华为云）与 `OSS`（阿里云）**不在 Polaris 规格的取值集合里**，是本工程的扩展：
+  规格把这两家云归入「兼容 S3 协议的对象存储」，靠自定义 `endpoint` 接入，
+  单列它们是为了让凭据下发能产出厂商原生的 `fs.obs.*` / `fs.oss.*` 键族。
+  超出规格的只是 `storageType` 的取值集合，REST Catalog 协议不受影响——引擎只原样透传这个字段。
   落库时整份配置存进一列 JSON，`storage_type` 与 `allowed_locations_json` 是它的投影列，
   便于直接用 SQL 筛选。`allowedLocations` 的首项即该 catalog 的仓库位置，
   表路径由它推导——改存储会同时改新库表的位置。
@@ -476,6 +480,14 @@ Catalog 侧与鉴权：
 | `paimon.rest.storage.aws.storages.<name>.secret-key` | 空 | 同上 |
 | `paimon.rest.storage.gcp.token` | 空 | GCS 访问令牌；留空则交给引擎自己的凭据链 |
 | `paimon.rest.storage.gcp.lifespan` | 空 | GCS 令牌有效期；比 `credential.ttl-seconds` 短时收窄 `expiresAt` |
+| `paimon.rest.storage.obs.access-key` | 空 | 华为云 OBS 默认凭据；三项全空则退化为环境凭据链 |
+| `paimon.rest.storage.obs.secret-key` | 空 | 同上 |
+| `paimon.rest.storage.obs.session-token` | 空 | OBS 临时凭据的安全令牌；长期凭据留空 |
+| `paimon.rest.storage.obs.storages.<name>.access-key` | 空 | OBS 具名存储，另支持 `.secret-key` / `.session-token` |
+| `paimon.rest.storage.oss.access-key` | 空 | 阿里云 OSS 默认凭据 |
+| `paimon.rest.storage.oss.secret-key` | 空 | 同上 |
+| `paimon.rest.storage.oss.session-token` | 空 | OSS 临时凭据的安全令牌（阿里侧键名为 `securityToken`） |
+| `paimon.rest.storage.oss.storages.<name>.access-key` | 空 | OSS 具名存储，另支持 `.secret-key` / `.session-token` |
 | `paimon.rest.storage.clients-cache-max-size` | 空 | 保留项，见下方说明 |
 | `paimon.rest.storage.max-http-connections` | 空 | 保留项，见下方说明 |
 | `paimon.rest.storage.read-timeout` | 空 | 读取超时；正数校验 |
@@ -486,14 +498,18 @@ Catalog 侧与鉴权：
 | `paimon.rest.storage.expect-continue-enabled` | 空 | 保留项，见下方说明 |
 | `paimon.rest.storage-credential-cache.max-entries` | `10000` | 已下发凭据的复用上限，条目按各自过期时间失效 |
 | `paimon.rest.credential-manager.type` | `default` | `default` 下发凭据；`noop` 不下发，读表接口返回 501 |
-| `paimon.rest.file-io.type` | `default` | 本部署接入的存储实现：`default`/`s3`/`azure`/`gcs`/`local` |
+| `paimon.rest.file-io.type` | `default` | 本部署接入的存储实现：`default`/`s3`/`azure`/`gcs`/`obs`/`oss`/`local` |
+
+`paimon.rest.storage.obs.*` 与 `paimon.rest.storage.oss.*` 两组**没有 Polaris 侧的对应项**
+——Polaris 没有这两个存储类型，它在 S3 兼容层上接入华为云与阿里云。
+本工程单列，是为了让这两家的 AK/SK 独立于 S3 那一份，各按各自的节奏轮转与授权。
 
 「保留项」指这些取值会被校验并在启动时打进日志，但当前实现没有出网的对象存储客户端，
 JDK 的 `HttpClient` 也没有对应的调节项，因此它们不改变行为。保留是为了让配置面与 Polaris
 一一对应，迁移时不必删配置。`read-timeout` 与 `connect-timeout` 之外的连接池参数属于此类。
 
-`paimon.rest.file-io.type` 决定 catalog 允许的 `storageType`：`default` 接受全部四种，
-`s3`/`azure`/`gcs` 只接受对应云存储加 `FILE`，`local` 只接受 `FILE`。
+`paimon.rest.file-io.type` 决定 catalog 允许的 `storageType`：`default` 接受全部六种，
+`s3`/`azure`/`gcs`/`obs`/`oss` 只接受对应云存储加 `FILE`，`local` 只接受 `FILE`。
 不接受本部署没有实现的存储类型时，创建或修改 catalog 直接返回 400，而不是让错误
 推迟到引擎第一次读写时才以文件系统异常暴露。`FILE` 在所有取值下都保留，它是本地的退路。
 
@@ -508,11 +524,23 @@ JDK 的 `HttpClient` 也没有对应的调节项，因此它们不改变行为�
 | `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | 具名存储 → 默认配置 → 环境凭据链 |
 | `AZURE` | `azure.tenant-id`、`azure.account`、`azure.hierarchical`、`azure.multi-tenant-app-name`、`azure.consent-url` | 仅定位元数据，见下 |
 | `GCS` | `gcs.oauth2.token`、`gcs.oauth2.token-expires-at`、`gcs.service-account` | 服务端配置 → 环境凭据链 |
+| `OBS` | `fs.obs.access.key`、`fs.obs.secret.key`、`fs.obs.session.token`、`fs.obs.endpoint` | 具名存储 → 默认配置 → 环境凭据链 |
+| `OSS` | `fs.oss.accessKeyId`、`fs.oss.accessKeySecret`、`fs.oss.securityToken`、`fs.oss.endpoint` | 同上 |
 | `FILE` | 自包含令牌（`accessKeyId`/`securityToken`/`expiration`/`tablePath`） | 服务端自签，文件系统本身不校验 |
+
+`OBS` 与 `OSS` 都是兼容 S3 协议的对象存储，但**键名族互不通用，也都不认 `s3.*`**：
+Paimon 的 `paimon-obs` 与 `paimon-oss` 是两个独立的 FileIO。两家的命名风格还不一致——
+华为是点分隔小写（`fs.obs.access.key`），阿里是驼峰（`fs.oss.accessKeyId`）；
+连「临时凭据的令牌」都不同名（`session.token` 对 `securityToken`）。
+这些差异来自各自的 Hadoop FileSystem（`hadoop-huaweicloud` 与 `hadoop-aliyun`），不是笔误，
+改「统一」会让其中一侧静默失效：引擎只是拿不到凭据，然后在第一次读数据时以看似无关的文件系统异常失败。
 
 `endpointInternal`、`stsEndpoint`、`roleArn`、`externalId`、`userArn` 一律不下发：
 前者规格明确写了客户端看不到，后三者是服务端去换临时凭据的材料。
 下发的键名写错不会报错，只会让引擎静默拿不到凭据，因此每种类型都有断言键名本身的测试。
+
+仍可用 S3 类型接入华为云与阿里云：两者都提供 S3 兼容端点，把 `endpoint` 指向该端点即可。
+代价是拿不到厂商原生的临时凭据键与凭据提供器配置，且多依赖一层协议转换。
 
 Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.storage.*` 里没有 Azure 账户密钥这一项，
 它靠服务进程自身的 Azure 标识签 SAS，而本工程没有那层标识。硬造一个签名错误的 SAS
@@ -580,7 +608,7 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
 
 ## 10. 测试
 
-### 单元与集成测试（164 个用例）
+### 单元与集成测试（180 个用例）
 
 ```bash
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
@@ -589,17 +617,17 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 测试连的是内存 H2（`test` profile，见 `src/test/resources/application-test.yml`），
 **不依赖本机是否有 MySQL**。
 
-服务端（88 个）：
+服务端（104 个）：
 
 | 测试类 | 覆盖 |
 | --- | --- |
 | `PaimonRestCatalogApiTests` | 配置发现、建表与 schema 变更（加列 / 改名 / 改类型 / 改可空性 / 改属性）/ 回滚、快照提交与乐观并发、分区统计、视图与函数、语义视图 1 MiB 上限、消费者位点、凭证下发与 403、各类 404 的 `resourceType` |
 | `ManagementApiTests` | 管理 API 的主体、角色、装配与授权链路 |
-| `StorageConfigApiTests` | `storageConfigInfo` 四种存储类型的建 / 读 / 改往返、`AZURE` 缺 `tenantId` 与空位置的 400、换存储后新库位置随之改变 |
+| `StorageConfigApiTests` | `storageConfigInfo` 六种存储类型的建 / 读 / 改往返、`AZURE` 缺 `tenantId` 与空位置的 400、换存储后新库位置随之改变、OBS↔OSS 换类型时端点一起替换 |
 | `StorageConfigDtosTests` | 判别联合的绑定位形：子类型注册名与枚举一致、判别字段只出现一次、跨类型字段不串、落库路径（`Json`）往返 |
-| `StorageCredentialApiTests` | 按存储类型下发凭据的 HTTP 链路：S3 的密钥来源（默认配置与具名存储）与不下发 `endpointInternal` / `stsEndpoint`、`stsUnavailable` 时不给密钥、Azure 只给定位元数据、GCS 的 `lifespan` 收窄 `expiresAt`、FILE 保留自包含令牌、未过期凭据被复用（比对 `expiresAt` 而非密钥） |
-| `StorageCredentialResolutionTests` | 凭据解析与缓存的单元行为：具名存储优先且找不到时明确失败而非退回默认凭据、服务端专用字段不泄露、Azure 账户名只在已知端点后缀上解析、GCS `lifespan` 与 `ttl` 取小、LRU 淘汰与过期失效、两个策略枚举的取值校验与错误信息 |
-| `StoragePolicyApiTests` | `file-io.type=s3` 时拒绝 Azure / GCS catalog 并在报错里点明原因、接受 S3 与 FILE；`credential-manager.type=noop` 时凭据下发返回 501 |
+| `StorageCredentialApiTests` | 按存储类型下发凭据的 HTTP 链路：S3 的密钥来源（默认配置与具名存储）与不下发 `endpointInternal` / `stsEndpoint`、`stsUnavailable` 时不给密钥、Azure 只给定位元数据、GCS 的 `lifespan` 收窄 `expiresAt`、OBS / OSS 各自走对键族且不串族、FILE 保留自包含令牌、未过期凭据被复用（比对 `expiresAt` 而非密钥） |
+| `StorageCredentialResolutionTests` | 凭据解析与缓存的单元行为：具名存储优先且找不到时明确失败而非退回默认凭据、服务端专用字段不泄露、Azure 账户名只在已知端点后缀上解析、GCS `lifespan` 与 `ttl` 取小、OBS / OSS 的键名族与临时凭据令牌（含两家不同拼写）、两家的凭据互不可见、LRU 淘汰与过期失效、两个策略枚举的取值校验与错误信息 |
+| `StoragePolicyApiTests` | `file-io.type=s3` 时拒绝 Azure / GCS / OBS / OSS catalog 并在报错里点明原因、接受 S3 与 FILE；`credential-manager.type=noop` 时凭据下发返回 501 |
 | `AuthorizationTests` | 权限蕴含与判定的单元行为 |
 | `CatalogEndpointAuthorizationTests` | 从运行时请求映射枚举全部 `/v1/{prefix}/**` 端点，逐一核对授权映射是否已登记——新增端点若忘记登记映射会让构建失败 |
 | `MysqlDdlGeneratorTests` | 由实体元数据生成 MySQL DDL，并断言方言被钉在 MySQL 8.0（见「代码生成」） |

@@ -162,6 +162,23 @@ public class RestServerProperties {
 
         private final Gcp gcp = new Gcp();
 
+        /**
+         * 华为云 OBS 凭据。
+         *
+         * <p><b>为什么与 {@code aws} 分开而不是共用。</b>华为 OBS 与阿里云 OSS 都兼容
+         * S3 协议，看起来可以当成一类存储吃同一份凭据。但它们的 AK/SK 是独立签发、
+         * 独立轮转、独立授权的：挤进同一个键空间后，「给 OBS 换一把钥匙」与
+         * 「给生产 S3 换一把钥匙」就没法区分，只能靠命名约定维持，而命名约定不会在
+         * 轮转出错时提醒任何人。
+         *
+         * <p>这一组不是 Polaris 配置面的对应项——Polaris 里没有 OBS 存储类型，
+         * 它用 S3 兼容层接入。本工程单列，理由见 {@code ManagementEnums.StorageType}。
+         */
+        private final CloudCredentials obs = new CloudCredentials();
+
+        /** 阿里云 OSS 凭据，结构与 {@link #obs} 相同。 */
+        private final CloudCredentials oss = new CloudCredentials();
+
         /** STS 客户端缓存上限，对应 Polaris 的 {@code polaris.storage.clients-cache-max-size}。 */
         @Min(1)
         private Integer clientsCacheMaxSize;
@@ -222,6 +239,46 @@ public class RestServerProperties {
             private String accessKey;
 
             private String secretKey;
+
+            /**
+             * 临时凭据的安全令牌。
+             *
+             * <p>与 AK/SK 三者必须同时提供——只给令牌不给 AK/SK 不会失败，
+             * 只会让引擎拿一份不完整的凭据去签名。华为与阿里都要求临时凭据
+             * 「AK + SK + 令牌」成套使用。
+             *
+             * <p>S3 的具名存储不使用这个字段：{@code AwsStorageConfigInfo} 用
+             * {@code stsUnavailable} 表达「不下发密钥」，服务端不再代持临时凭据。
+             */
+            private String sessionToken;
+        }
+
+        /**
+         * 一组对象存储凭据：默认凭据 + 具名存储。OBS 与 OSS 共用这个结构。
+         *
+         * <p>与 {@link Aws} 的差别只有 {@code sessionToken} 一项：华为与阿里的
+         * 临时凭据是「AK/SK + 安全令牌」三件套，长期凭据则只有 AK/SK。
+         * 没有把它合并进 {@link Aws}，是因为那会给 S3 凭空多出一个不生效的
+         * {@code aws.session-token} 配置键——服务端当前的 S3 分支不读它。
+         */
+        @Getter
+        @Setter
+        public static class CloudCredentials {
+
+            private String accessKey;
+
+            private String secretKey;
+
+            /** 安全令牌；留空表示使用长期凭据。三项都空则退化为环境凭据链。 */
+            private String sessionToken;
+
+            /**
+             * 具名存储的凭据，键为 {@code StorageConfigInfo.storageName}。
+             *
+             * <p>与 {@code aws.storages} 同构，理由相同：让 catalog 只引用一个名字，
+             * 密钥留在服务端配置里，不出现在管理 API 的报文中。
+             */
+            private Map<String, Keys> storages = new LinkedHashMap<>();
         }
 
         /**

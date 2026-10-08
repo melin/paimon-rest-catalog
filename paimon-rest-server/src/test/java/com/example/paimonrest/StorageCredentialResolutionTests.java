@@ -8,10 +8,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.example.paimonrest.config.RestServerProperties;
 import com.example.paimonrest.dto.ManagementEnums.StorageType;
+import com.example.paimonrest.dto.StorageDtos.AliyunOssStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.AwsStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.AzureStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.FileStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.GcpStorageConfigInfo;
+import com.example.paimonrest.dto.StorageDtos.HuaweiObsStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.StorageConfigInfo;
 import com.example.paimonrest.service.DefaultStorageCredentialManager;
 import com.example.paimonrest.service.StorageCredentialCache;
@@ -22,6 +24,7 @@ import com.example.paimonrest.support.VendedStorageCredential;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -222,6 +225,174 @@ class StorageCredentialResolutionTests {
         assertEquals(VendedStorageCredential.SOURCE_ENVIRONMENT, vended.source());
     }
 
+    // ------------------------------------------------------------------ OBS
+
+    /**
+     * 华为 OBS 下发的必须是 OBS 自己的键名族。
+     *
+     * <p>这一条断言的是「键名本身」，不是「有没有返回值」。OBS 与 OSS 都兼容 S3 协议，
+     * 用 {@code s3.*} 或对方的键名去配，调用链上没有任何一处会报错——引擎只是静默地
+     * 拿不到凭据，然后在第一次读数据时以一个看似无关的文件系统异常失败。
+     */
+    @Test
+    void obsVendsItsOwnKeyFamilyIncludingSessionToken() {
+        RestServerProperties.Storage.CloudCredentials obs = properties.getStorage().getObs();
+        obs.setAccessKey("OBS-AK");
+        obs.setSecretKey("OBS-SK");
+        obs.setSessionToken("OBS-SESSION-TOKEN");
+
+        VendedStorageCredential vended = manager.vend(
+                obsConfig("obs://analytics/warehouse", null, "obs.cn-north-4.myhuaweicloud.com"), "t1", null);
+
+        assertEquals("OBS-AK", vended.token().get("fs.obs.access.key"));
+        assertEquals("OBS-SK", vended.token().get("fs.obs.secret.key"));
+        assertEquals("OBS-SESSION-TOKEN", vended.token().get("fs.obs.session.token"));
+        assertEquals("obs.cn-north-4.myhuaweicloud.com", vended.token().get("fs.obs.endpoint"));
+        assertEquals(VendedStorageCredential.SOURCE_CONFIGURATION, vended.source());
+        assertTrue(vended.hasSecrets());
+
+        // 不得混入另外两套键名族
+        assertFalse(hasAnyKeyStartingWith(vended.token(), "s3."));
+        assertFalse(hasAnyKeyStartingWith(vended.token(), "fs.oss."));
+    }
+
+    /** 长期凭据没有安全令牌，此时不该出现一个空值的 session token 键。 */
+    @Test
+    void obsOmitsSessionTokenForLongTermCredentials() {
+        properties.getStorage().getObs().setAccessKey("OBS-AK");
+        properties.getStorage().getObs().setSecretKey("OBS-SK");
+
+        VendedStorageCredential vended =
+                manager.vend(obsConfig("obs://analytics/warehouse", null, null), "t1", null);
+
+        assertFalse(vended.token().containsKey("fs.obs.session.token"));
+        assertEquals("OBS-AK", vended.token().get("fs.obs.access.key"));
+    }
+
+    /**
+     * 具名存储优先，且安全令牌跟着它所属的那一级走。
+     *
+     * <p>临时凭据的 AK、SK、令牌是一次签发的同一组，混搭（具名存储的 AK/SK 配默认配置的
+     * 令牌）只会得到一份签名不过的组合，不如让两级各自成套。
+     */
+    @Test
+    void obsPrefersNamedStorageTogetherWithItsOwnSessionToken() {
+        RestServerProperties.Storage.CloudCredentials obs = properties.getStorage().getObs();
+        obs.setAccessKey("OBS-DEFAULT-AK");
+        obs.setSecretKey("OBS-DEFAULT-SK");
+        obs.setSessionToken("OBS-DEFAULT-TOKEN");
+        namedObsKeys("warehouse-a", "OBS-NAMED-AK", "OBS-NAMED-SK", "OBS-NAMED-TOKEN");
+
+        VendedStorageCredential vended =
+                manager.vend(obsConfig("obs://analytics/warehouse", "warehouse-a", null), "t1", null);
+
+        assertEquals("OBS-NAMED-AK", vended.token().get("fs.obs.access.key"));
+        assertEquals("OBS-NAMED-TOKEN", vended.token().get("fs.obs.session.token"));
+        assertEquals("named-storage:warehouse-a", vended.source());
+    }
+
+    /** 错误信息要指向 OBS 那一组配置，否则运维会去翻 aws.storages 找半天。 */
+    @Test
+    void obsFailsWhenStorageNameIsNotConfigured() {
+        properties.getStorage().getObs().setAccessKey("OBS-AK");
+        properties.getStorage().getObs().setSecretKey("OBS-SK");
+
+        ApiException failure = assertThrows(ApiException.class, () -> manager.vend(
+                obsConfig("obs://analytics/warehouse", "typo-storage", null), "t1", null));
+
+        assertEquals(500, failure.getStatus());
+        assertTrue(failure.getMessage().contains("typo-storage"));
+        assertTrue(failure.getMessage().contains("paimon.rest.storage.obs.storages"), failure.getMessage());
+    }
+
+    /** 声明不下发凭据时端点仍要发：引擎得知道连哪里，它可能自带 ECS 委托身份。 */
+    @Test
+    void obsKeepsEndpointWhenStsUnavailable() {
+        properties.getStorage().getObs().setAccessKey("OBS-AK");
+        properties.getStorage().getObs().setSecretKey("OBS-SK");
+
+        VendedStorageCredential vended = manager.vend(
+                new HuaweiObsStorageConfigInfo(List.of("obs://analytics/warehouse"), null,
+                        "obs.cn-north-4.myhuaweicloud.com", Boolean.TRUE),
+                "t1", null);
+
+        assertFalse(vended.token().containsKey("fs.obs.access.key"));
+        assertFalse(vended.hasSecrets());
+        assertEquals(VendedStorageCredential.SOURCE_STS_UNAVAILABLE, vended.source());
+        assertEquals("obs.cn-north-4.myhuaweicloud.com", vended.token().get("fs.obs.endpoint"));
+    }
+
+    @Test
+    void obsFallsBackToEnvironmentWhenNothingConfigured() {
+        VendedStorageCredential vended = manager.vend(
+                obsConfig("obs://analytics/warehouse", null, "obs.cn-north-4.myhuaweicloud.com"), "t1", null);
+
+        assertFalse(vended.token().containsKey("fs.obs.access.key"));
+        assertEquals(VendedStorageCredential.SOURCE_ENVIRONMENT, vended.source());
+        // 没有凭据不等于没有端点
+        assertEquals("obs.cn-north-4.myhuaweicloud.com", vended.token().get("fs.obs.endpoint"));
+    }
+
+    // ------------------------------------------------------------------ OSS
+
+    /**
+     * 阿里云 OSS 的键名族与 OBS 不同名：{@code accessKeyId} 是驼峰，
+     * 临时凭据叫 {@code securityToken} 而不是 {@code session.token}。
+     *
+     * <p>这两套命名风格的差异是真实存在的（分别来自 {@code hadoop-aliyun} 与
+     * {@code hadoop-huaweicloud}），不是笔误。按「两边应该长得一样」去改，
+     * 会让其中一侧静默失效。
+     */
+    @Test
+    void ossVendsCamelCaseKeysAndSecurityToken() {
+        RestServerProperties.Storage.CloudCredentials oss = properties.getStorage().getOss();
+        oss.setAccessKey("OSS-AK");
+        oss.setSecretKey("OSS-SK");
+        oss.setSessionToken("OSS-STS-TOKEN");
+
+        VendedStorageCredential vended = manager.vend(
+                ossConfig("oss://analytics/warehouse", null, "oss-cn-hangzhou.aliyuncs.com"), "t1", null);
+
+        assertEquals("OSS-AK", vended.token().get("fs.oss.accessKeyId"));
+        assertEquals("OSS-SK", vended.token().get("fs.oss.accessKeySecret"));
+        assertEquals("OSS-STS-TOKEN", vended.token().get("fs.oss.securityToken"));
+        assertEquals("oss-cn-hangzhou.aliyuncs.com", vended.token().get("fs.oss.endpoint"));
+        assertEquals(VendedStorageCredential.SOURCE_CONFIGURATION, vended.source());
+        assertTrue(vended.hasSecrets());
+
+        assertFalse(hasAnyKeyStartingWith(vended.token(), "s3."));
+        assertFalse(hasAnyKeyStartingWith(vended.token(), "fs.obs."));
+    }
+
+    /**
+     * 两家的凭据互不可见。
+     *
+     * <p>它们是独立签发、独立授权的密钥，配了一家的不该让另一家的 catalog 也拿到——
+     * 否则「给 OBS 配了钥匙」会顺带把权限扩到 OSS 上，而这正是把配置组分开要防的事。
+     */
+    @Test
+    void obsCredentialsAreNotVisibleToOssCatalogs() {
+        properties.getStorage().getObs().setAccessKey("OBS-AK");
+        properties.getStorage().getObs().setSecretKey("OBS-SK");
+
+        VendedStorageCredential vended =
+                manager.vend(ossConfig("oss://analytics/warehouse", null, null), "t1", null);
+
+        assertFalse(vended.hasSecrets());
+        assertEquals(VendedStorageCredential.SOURCE_ENVIRONMENT, vended.source());
+    }
+
+    @Test
+    void ossFailsWhenStorageNameIsNotConfigured() {
+        properties.getStorage().getOss().setAccessKey("OSS-AK");
+        properties.getStorage().getOss().setSecretKey("OSS-SK");
+
+        ApiException failure = assertThrows(ApiException.class, () -> manager.vend(
+                ossConfig("oss://analytics/warehouse", "typo-storage", null), "t1", null));
+
+        assertTrue(failure.getMessage().contains("paimon.rest.storage.oss.storages"), failure.getMessage());
+    }
+
     // ------------------------------------------------------------------ FILE
 
     @Test
@@ -329,7 +500,13 @@ class StorageCredentialResolutionTests {
             assertTrue(type.supports(StorageType.FILE), type + " must keep FILE available");
         }
         assertEquals(1, FileIoType.LOCAL.supportedStorageTypes().size());
-        assertEquals(4, FileIoType.DEFAULT.supportedStorageTypes().size());
+        assertEquals(6, FileIoType.DEFAULT.supportedStorageTypes().size());
+        // OBS / OSS 各自只放开自己那一种云存储，不是「所有对象存储」
+        assertTrue(FileIoType.OBS.supports(StorageType.OBS));
+        assertFalse(FileIoType.OBS.supports(StorageType.OSS));
+        assertFalse(FileIoType.OBS.supports(StorageType.S3));
+        assertTrue(FileIoType.OSS.supports(StorageType.OSS));
+        assertFalse(FileIoType.OSS.supports(StorageType.OBS));
     }
 
     @Test
@@ -362,5 +539,26 @@ class StorageCredentialResolutionTests {
     private static AwsStorageConfigInfo s3(String location, String storageName) {
         return new AwsStorageConfigInfo(new ArrayList<>(List.of(location)), storageName,
                 null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    private void namedObsKeys(String name, String accessKey, String secretKey, String sessionToken) {
+        RestServerProperties.Storage.Keys keys = new RestServerProperties.Storage.Keys();
+        keys.setAccessKey(accessKey);
+        keys.setSecretKey(secretKey);
+        keys.setSessionToken(sessionToken);
+        properties.getStorage().getObs().getStorages().put(name, keys);
+    }
+
+    private static HuaweiObsStorageConfigInfo obsConfig(String location, String storageName, String endpoint) {
+        return new HuaweiObsStorageConfigInfo(List.of(location), storageName, endpoint, null);
+    }
+
+    private static AliyunOssStorageConfigInfo ossConfig(String location, String storageName, String endpoint) {
+        return new AliyunOssStorageConfigInfo(List.of(location), storageName, endpoint, null);
+    }
+
+    /** 键名族是否越界：断言「不含某前缀的键」比逐个断言「含哪些键」更能抓住串族。 */
+    private static boolean hasAnyKeyStartingWith(Map<String, String> token, String prefix) {
+        return token.keySet().stream().anyMatch(key -> key.startsWith(prefix));
     }
 }

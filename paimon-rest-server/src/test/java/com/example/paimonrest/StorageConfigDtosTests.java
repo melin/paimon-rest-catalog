@@ -8,10 +8,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.example.paimonrest.dto.ManagementDtos;
 import com.example.paimonrest.dto.ManagementEnums.StorageType;
+import com.example.paimonrest.dto.StorageDtos.AliyunOssStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.AwsStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.AzureStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.FileStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.GcpStorageConfigInfo;
+import com.example.paimonrest.dto.StorageDtos.HuaweiObsStorageConfigInfo;
 import com.example.paimonrest.dto.StorageDtos.StorageConfigInfo;
 import com.example.paimonrest.support.Json;
 import com.example.paimonrest.support.StorageConfigs;
@@ -23,7 +25,7 @@ import tools.jackson.databind.json.JsonMapper;
  * 存储配置判别联合的绑定测试。
  *
  * <p>这一层测的是「Java 模型与规格的判别约定是否对齐」，不涉及 HTTP 与数据库：
- * 子类型注册名与 {@link StorageType} 的对外取值是否一致、四种存储各自的字段能否
+ * 子类型注册名与 {@link StorageType} 的对外取值是否一致、每种存储各自的字段能否
  * 正确往返、非法 {@code storageType} 是否被拒绝。这些都只在序列化层面才能验证，
  * 走 HTTP 的用例看不到。
  */
@@ -145,6 +147,75 @@ class StorageConfigDtosTests {
         assertTrue(written.contains("\"storageType\":\"FILE\""), written);
         assertFalse(written.contains("roleArn"), "FILE 不应带出 S3 字段: " + written);
         assertFalse(written.contains("tenantId"), "FILE 不应带出 Azure 字段: " + written);
+    }
+
+    /**
+     * OBS / OSS 是本工程的扩展子类型，注册名不在规格的 {@code discriminator.mapping} 里。
+     * 它们最容易出的错不是解析失败，而是「两个都兼容 S3 的对象存储被写混」——
+     * 所以除了往返，还要断言各自不把对方的字段带出来。
+     */
+    @Test
+    void obsConfigCarriesEndpointAndItsOwnDiscriminator() {
+        String json = """
+                {"storageType":"OBS",
+                 "allowedLocations":["obs://analytics-bucket/warehouse/"],
+                 "storageName":"named-obs",
+                 "endpoint":"obs.cn-north-4.myhuaweicloud.com",
+                 "stsUnavailable":false}
+                """;
+
+        HuaweiObsStorageConfigInfo obs = assertInstanceOf(HuaweiObsStorageConfigInfo.class,
+                mapper.readValue(json, StorageConfigInfo.class));
+
+        assertEquals(List.of("obs://analytics-bucket/warehouse/"), obs.allowedLocations());
+        assertEquals("named-obs", obs.storageName());
+        assertEquals("obs.cn-north-4.myhuaweicloud.com", obs.endpoint());
+        assertEquals(Boolean.FALSE, obs.stsUnavailable());
+        assertEquals(StorageType.OBS, obs.storageType());
+
+        String written = mapper.writeValueAsString(obs);
+        assertTrue(written.contains("\"storageType\":\"OBS\""), written);
+        assertFalse(written.contains("accessKeyId"), "OBS 不该带出 OSS 字段: " + written);
+        assertFalse(written.contains("tenantId"), "OBS 不该带出 Azure 字段: " + written);
+    }
+
+    @Test
+    void ossConfigCarriesEndpointAndItsOwnDiscriminator() {
+        String json = """
+                {"storageType":"OSS",
+                 "allowedLocations":["oss://analytics-bucket/warehouse/"],
+                 "storageName":"named-oss",
+                 "endpoint":"oss-cn-hangzhou.aliyuncs.com"}
+                """;
+
+        AliyunOssStorageConfigInfo oss = assertInstanceOf(AliyunOssStorageConfigInfo.class,
+                mapper.readValue(json, StorageConfigInfo.class));
+
+        assertEquals("oss-cn-hangzhou.aliyuncs.com", oss.endpoint());
+        assertEquals("named-oss", oss.storageName());
+        assertEquals(StorageType.OSS, oss.storageType());
+
+        String written = mapper.writeValueAsString(oss);
+        assertTrue(written.contains("\"storageType\":\"OSS\""), written);
+        assertFalse(written.contains("gcsServiceAccount"), "OSS 不该带出 GCS 字段: " + written);
+    }
+
+    /** 两个扩展子类型也要走一遍落库编解码——它们与规格内类型的差别只在注册名。 */
+    @Test
+    void extensionStorageConfigsSurvivePersistence() {
+        AliyunOssStorageConfigInfo oss = new AliyunOssStorageConfigInfo(
+                List.of("oss://analytics-bucket/warehouse/"), "named-oss",
+                "oss-cn-hangzhou.aliyuncs.com", null);
+
+        String stored = Json.write(oss);
+
+        assertTrue(stored.contains("\"storageType\":\"OSS\""), stored);
+        assertEquals(oss, Json.read(stored, StorageConfigInfo.class), "落库再读回应逐字段相等");
+
+        HuaweiObsStorageConfigInfo obs = new HuaweiObsStorageConfigInfo(
+                List.of("obs://analytics-bucket/warehouse/"), null,
+                "obs.cn-north-4.myhuaweicloud.com", Boolean.TRUE);
+        assertEquals(obs, Json.read(Json.write(obs), StorageConfigInfo.class));
     }
 
     /**

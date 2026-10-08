@@ -44,7 +44,12 @@ import tools.jackson.databind.node.JsonNodeFactory;
         "paimon.rest.storage.aws.storages.named-a.access-key=AKIA-NAMED",
         "paimon.rest.storage.aws.storages.named-a.secret-key=SECRET-NAMED",
         "paimon.rest.storage.gcp.token=ya29.token-from-config",
-        "paimon.rest.storage.gcp.lifespan=10m"
+        "paimon.rest.storage.gcp.lifespan=10m",
+        "paimon.rest.storage.obs.access-key=OBS-AK-CONFIG",
+        "paimon.rest.storage.obs.secret-key=OBS-SK-CONFIG",
+        "paimon.rest.storage.obs.session-token=OBS-TOKEN-CONFIG",
+        "paimon.rest.storage.oss.access-key=OSS-AK-CONFIG",
+        "paimon.rest.storage.oss.secret-key=OSS-SK-CONFIG"
 })
 @ActiveProfiles("test")
 @AutoConfigureMockMvc
@@ -190,6 +195,55 @@ class StorageCredentialApiTests {
         long remaining = body.get("expiresAt").asLong() - System.currentTimeMillis();
         assertTrue(remaining > 0 && remaining <= 600_000L + 5_000L,
                 "gcs lifespan=10m should cap expiresAt well below the 1h default, remaining=" + remaining);
+    }
+
+    // ------------------------------------------------------------------ OBS / OSS
+
+    /**
+     * 扩展类型走的是同一条下发链路，要证明的是「读表接口真的按 catalog 的类型选了对应键族」。
+     *
+     * <p>这是端到端最容易漏的一环：本地单测里 {@code manager.vend(obs, ...)} 的入参是直接
+     * 构造出来的，而真实路径上的存储类型来自 JSON 列的反序列化结果。两者不一致时，
+     * 下发的会是另一套键名，而引擎只是静默地拿不到凭据。
+     */
+    @Test
+    void obsCatalogVendsObsKeyFamily() throws Exception {
+        String prefix = "obs-cred";
+        createCatalog(prefix, """
+                {"storageType":"OBS",
+                 "allowedLocations":["obs://analytics-bucket/warehouse/"],
+                 "endpoint":"obs.cn-north-4.myhuaweicloud.com"}
+                """);
+        seedTable(prefix);
+
+        JsonNode token = token(prefix).get("token");
+        assertEquals("OBS-AK-CONFIG", token.get("fs.obs.access.key").asString());
+        assertEquals("OBS-SK-CONFIG", token.get("fs.obs.secret.key").asString());
+        assertEquals("OBS-TOKEN-CONFIG", token.get("fs.obs.session.token").asString());
+        assertEquals("obs.cn-north-4.myhuaweicloud.com", token.get("fs.obs.endpoint").asString());
+        // 另两套键名族一个都不能出现
+        assertFalse(token.has("s3.access-key-id"));
+        assertFalse(token.has("fs.oss.accessKeyId"));
+    }
+
+    /** 阿里云侧的键名是驼峰，且没配临时凭据时不该出现空的 securityToken。 */
+    @Test
+    void ossCatalogVendsOssKeyFamily() throws Exception {
+        String prefix = "oss-cred";
+        createCatalog(prefix, """
+                {"storageType":"OSS",
+                 "allowedLocations":["oss://analytics-bucket/warehouse/"],
+                 "endpoint":"oss-cn-hangzhou.aliyuncs.com"}
+                """);
+        seedTable(prefix);
+
+        JsonNode token = token(prefix).get("token");
+        assertEquals("OSS-AK-CONFIG", token.get("fs.oss.accessKeyId").asString());
+        assertEquals("OSS-SK-CONFIG", token.get("fs.oss.accessKeySecret").asString());
+        assertEquals("oss-cn-hangzhou.aliyuncs.com", token.get("fs.oss.endpoint").asString());
+        assertFalse(token.has("fs.oss.securityToken"));
+        assertFalse(token.has("fs.obs.access.key"));
+        assertFalse(token.has("s3.access-key-id"));
     }
 
     // ------------------------------------------------------------------ FILE 与缓存

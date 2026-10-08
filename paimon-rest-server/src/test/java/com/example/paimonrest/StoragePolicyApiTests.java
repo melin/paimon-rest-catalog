@@ -88,6 +88,34 @@ class StoragePolicyApiTests {
         assertEquals(400, gcs.getResponse().getStatus(), gcs.getResponse().getContentAsString());
     }
 
+    /**
+     * 扩展类型（OBS / OSS）同样受 {@code file-io.type} 约束。
+     *
+     * <p>单独一条：它们不在规格的取值集合里，实现时容易被当成「额外放行」的特例。
+     * 本部署只接入了 S3，创建 OBS catalog 一样要拒——storageType 的取值集合变了，
+     * 策略的语义没变。
+     */
+    @Test
+    void extensionStorageTypesAreAlsoSubjectToFileIoPolicy() throws Exception {
+        MvcResult obs = perform(createCatalog("policy-obs", """
+                {"storageType":"OBS",
+                 "allowedLocations":["obs://analytics-bucket/wh/"],
+                 "endpoint":"obs.cn-north-4.myhuaweicloud.com"}
+                """));
+        assertEquals(400, obs.getResponse().getStatus(), obs.getResponse().getContentAsString());
+        String message = obs.getResponse().getContentAsString();
+        assertTrue(message.contains("OBS"), message);
+        // 与其它类型同一条错误契约：说清是本部署没接入，而不是配置写错了
+        assertTrue(message.contains("paimon.rest.file-io.type"), message);
+
+        MvcResult oss = perform(createCatalog("policy-oss", """
+                {"storageType":"OSS","allowedLocations":["oss://analytics-bucket/wh/"]}
+                """));
+        assertEquals(400, oss.getResponse().getStatus(), oss.getResponse().getContentAsString());
+        assertTrue(oss.getResponse().getContentAsString().contains("OSS"),
+                oss.getResponse().getContentAsString());
+    }
+
     /** 本部署接入了 S3，创建 S3 catalog 与本地仓库都应当通过——限制的是没有的实现，不是云存储本身。 */
     @Test
     void fileIoTypeAcceptsItsOwnStorageTypeAndLocal() throws Exception {

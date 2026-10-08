@@ -53,8 +53,16 @@ public record VendedStorageCredential(Map<String, String> token,
         return source != null && source.startsWith(SOURCE_NAMED_STORAGE_PREFIX);
     }
 
-    /** 是否真的下发了密钥（而非只给定位信息）。 */
+    /**
+     * 是否真的下发了密钥（而非只给定位信息）。
+     *
+     * <p>按 {@link #source} 判断，而不是遍历 {@link #token} 里有没有密钥键。
+     * 早先的写法是硬编码「含 {@code s3.secret-access-key} 或 {@code gcs.oauth2.token}」，
+     * 每加一种存储类型就要回来补一个字符串，漏补时表现为「明明发了密钥却报没发」——
+     * 一处与存储类型数量同步的清单，是最容易忘的地方。
+     * 而「密钥从哪一级取到」这个信息，下发方本来就已经算出来了。
+     */
     public boolean hasSecrets() {
-        return token.containsKey("s3.secret-access-key") || token.containsKey("gcs.oauth2.token");
+        return SOURCE_CONFIGURATION.equals(source) || namedStorage();
     }
 }

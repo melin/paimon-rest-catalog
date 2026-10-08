@@ -74,6 +74,8 @@ paimon:
     # -----------------------------------------------------------------------
     # 存储与凭据，对应 Polaris 1.8.0 配置参考的「Storage & Credentials」一节。
     # 键名逐项对应，只把前缀从 polaris 换成 paimon.rest，运维迁配置时可以按名字平移。
+    # 例外是下面 obs / oss 两组：Polaris 没有这两个存储类型（它用 S3 兼容层接入），
+    # 因此没有可平移的键名，是本工程按厂商 FileIO 配置面新加的。
     # -----------------------------------------------------------------------
     storage:
       aws:
@@ -90,6 +92,27 @@ paimon:
         token: ""
         # 令牌有效期；非空时会同时收窄令牌自身与响应里的 expiresAt
         lifespan: null
+      # 华为云 OBS 凭据。与 aws 分开而不是共用：三家的 AK/SK 独立签发、独立轮转、
+      # 独立授权，挤进同一个键空间后「给 OBS 换钥匙」与「给生产 S3 换钥匙」就没法区分。
+      # 这一组没有 Polaris 的对应项——Polaris 用 S3 兼容层接入 OBS，本工程单列。
+      obs:
+        # 三项都留空则退化为环境凭据链：引擎用自己的 fs.obs.security.provider
+        # （环境变量 / ECS 委托身份）去取，服务端不下发任何密钥
+        access-key: ""
+        secret-key: ""
+        # 临时凭据的安全令牌（华为的键名是 fs.obs.session.token）。
+        # 临时凭据必须 AK + SK + 令牌成套提供，只给令牌不会失败、只会签名不过
+        session-token: ""
+        # 具名存储，键为 catalog 的 storageConfigInfo.storageName。
+        # 密钥只留在服务端配置里，不落进 catalog 元数据
+        storages: {}
+      # 阿里云 OSS 凭据，结构同 obs
+      oss:
+        access-key: ""
+        secret-key: ""
+        # 阿里云侧的键名是 fs.oss.securityToken，这里沿用同一命名约定
+        session-token: ""
+        storages: {}
       # 以下连接参数当前只做取值校验与启动日志输出：JDK 的 HttpClient 没有
       # 对应的调节项，保留它们是为了配置面与 Polaris 一一对应
       clients-cache-max-size: 100
@@ -109,7 +132,8 @@ paimon:
       type: default
     file-io:
       # 本部署接入了哪些存储实现，决定 catalog 允许的 storageType：
-      # default -> FILE/S3/AZURE/GCS；s3|azure|gcs -> 对应云存储 + FILE；local -> 仅 FILE
+      # default -> FILE/S3/AZURE/GCS/OBS/OSS；s3|azure|gcs|obs|oss -> 对应云存储 + FILE；
+      # local -> 仅 FILE。obs / oss 两个取值是本工程扩展，Polaris 侧没有
       type: default
     initial-catalog:
       # 启动时预置的 catalog；留空表示不预置

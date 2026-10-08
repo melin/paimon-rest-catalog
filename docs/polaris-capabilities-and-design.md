@@ -49,7 +49,7 @@ Paimon 的 REST Catalog 规格遵循同一范式，但对象模型不同：Polar
 | 多租户 / 多 catalog | 路径前缀 `{prefix}` 即 catalog 标识 | `CatalogEntity` + `CatalogService.resolve()`，支持未登记 prefix 自动登记 |
 | catalog 类型（internal / external） | `register` 进来的表标记 `isExternal` | `TableEntity.external` + `POST .../databases/{database}/register` |
 | 存储配置抽象 | `warehouse` + 表路径约定 | `default-warehouse` 与 `path-template` 配置项；路径按 `warehouse/database.db/table` 推导 |
-| 存储类型与凭据（S3 / Azure / GCS） | `StorageConfigInfo` 判别联合 + `polaris.storage.*` 配置 | 管理面四种 `storageType` 完整建模并落库（`StorageConfigs`）；服务端侧配置面见 `RestServerProperties.Storage`、`CredentialManager`、`FileIo`，下发规则见 `StorageCredentialManager` |
+| 存储类型与凭据（S3 / Azure / GCS） | `StorageConfigInfo` 判别联合 + `polaris.storage.*` 配置 | 管理面六种 `storageType` 完整建模并落库（`StorageConfigs`），其中 `OBS` / `OSS` 为超出规格的扩展（见下）；服务端侧配置面见 `RestServerProperties.Storage`、`CredentialManager`、`FileIo`，下发规则见 `StorageCredentialManager` |
 | 凭证下发 | `GET .../tables/{table}/token` | `CredentialService.token()`：按 catalog 的存储类型分派，经 `StorageCredentialCache` 复用未过期凭据并返回 `expiresAt` |
 | 查询鉴权与策略下推 | `POST .../tables/{table}/auth` | `CredentialService.auth()`：返回行过滤表达式与列脱敏映射；请求列不在 schema 中时返回 403 |
 | RBAC 细粒度权限 | 由 REST Management API 承担权限面 | 已实现：主体 → principal role → catalog role → 资源授权的完整链路，并作为 `/v1/**` 的判定依据。见第六节 |
@@ -87,6 +87,8 @@ Paimon 的 REST Catalog 规格遵循同一范式，但对象模型不同：Polar
 | `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | 具名存储 → 默认配置 → 环境凭据链 |
 | `AZURE` | `azure.tenant-id`、`azure.account`、`azure.hierarchical`、`azure.multi-tenant-app-name`、`azure.consent-url` | 仅定位元数据 |
 | `GCS` | `gcs.oauth2.token`、`gcs.oauth2.token-expires-at`、`gcs.service-account` | 服务端配置 → 环境凭据链 |
+| `OBS` | `fs.obs.access.key`、`fs.obs.secret.key`、`fs.obs.session.token`、`fs.obs.endpoint` | 具名存储 → 默认配置 → 环境凭据链 |
+| `OSS` | `fs.oss.accessKeyId`、`fs.oss.accessKeySecret`、`fs.oss.securityToken`、`fs.oss.endpoint` | 同上 |
 | `FILE` | 自包含令牌（`accessKeyId` / `securityToken` / `expiration` / `tablePath`） | 服务端自签 |
 
 选定的实现由 `paimon.rest.credential-manager.type` 决定：`default` 走上面的分派，
@@ -97,9 +99,27 @@ Paimon 的 REST Catalog 规格遵循同一范式，但对象模型不同：Polar
 对应 Polaris 的短时效、按需授权模型。未过期的凭据在
 `paimon.rest.storage-credential-cache.max-entries` 的容量内被复用，同一张表反复读拿到的是同一份凭据。
 
+### 4. OBS / OSS 是超出规格的扩展
+
+`OBS` 与 `OSS` 不在 Polaris 规格 `StorageConfigInfo.discriminator.mapping` 的取值里。
+Polaris 把华为云 OBS 与阿里云 OSS 归入「兼容 S3 协议的对象存储」，靠自定义 `endpoint` 接入，
+因此没有可平移的类型与配置项。
+
+本工程单列它们，理由是**兼容 S3 协议不等于可用 `s3.*` 配置**：Paimon 的
+`paimon-obs` 与 `paimon-oss` 是两个独立的 FileIO，各认自己的一套键，且两套命名风格还不一致
+（华为 `fs.obs.access.key` 点分隔小写，阿里 `fs.oss.accessKeyId` 驼峰；
+临时凭据的令牌一个叫 `session.token`、一个叫 `securityToken`）。走 S3 兼容层能用，
+但拿不到这些厂商原生的键与凭据提供器配置。两套键名族在
+`DefaultStorageCredentialManager.OBS_KEYS` / `OSS_KEYS` 里集中声明，便于对照。
+
+代价是 `storageType` 的取值集合超出规格。影响面仅限管理 API 的按类型分派逻辑：
+引擎只把 `storageConfigInfo` 原样透传、不解析 `storageType`，因此 REST Catalog 协议不受影响。
+
 **边界。** `S3` 与 `GCS` 下发的是服务端长期密钥或配置令牌，不是 STS / OAuth 换取的临时凭据——
 这需要服务端持有云侧信任关系。`AZURE` 只传定位元数据：Polaris 的 `polaris.storage.*` 里没有
 Azure 账户密钥，它靠服务进程自身的 Azure 标识签 SAS，本工程没有那层标识。
+`OBS` / `OSS` 同理：服务端只代持配置里的 AK/SK（或成套的临时凭据），
+不代为向华为云 / 阿里云申请 STS 令牌。
 接入真实临时凭据时应替换 `DefaultStorageCredentialManager` 的对应分支，这是本实现预留的外部集成点。
 
 ### 4. 元数据模型按「当前值 + 历史版本」组织

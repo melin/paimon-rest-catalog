@@ -26,14 +26,14 @@ import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.JsonNodeFactory;
 
 /**
- * {@code storageConfigInfo} 四种存储类型的 HTTP 层验收。
+ * {@code storageConfigInfo} 每种存储类型的 HTTP 层验收。
  *
  * <p>为什么单独一层：DTO 层的测试（{@code StorageConfigDtosTests}）只能证明
  * 「JSON 与 Java 模型对得上」，证明不了「服务端真的按类型校验、真的把配置存下来、
  * 真的用它推导仓库位置」。这里走完整链路，重点验三件事：
  *
  * <ol>
- *   <li>四种 {@code storageType} 各自能建、能读、能改，类型专属字段不丢也不串；
+ *   <li>每种 {@code storageType} 各自能建、能读、能改，类型专属字段不丢也不串；
  *   <li>按类型校验生效——{@code AZURE} 缺 {@code tenantId} 应当被拒，而不是静默写成半份配置；
  *   <li>存储位置真的传导到数据面——改过 {@code allowedLocations} 之后，
  *       该 catalog 下新建的库位于新位置之下。
@@ -106,7 +106,7 @@ class StorageConfigApiTests {
                 mapper.getTypeFactory().constructCollectionType(List.class, String.class));
     }
 
-    // ------------------------------------------------------------------ 四种类型各自往返
+    // ------------------------------------------------------------------ 各类型各自往返
 
     @Test
     void s3CatalogKeepsEveryS3SpecificField() throws Exception {
@@ -205,6 +205,43 @@ class StorageConfigApiTests {
         assertFalse(storage.has("roleArn"), "FILE 配置不应带出 S3 字段: " + storage);
         assertFalse(storage.has("tenantId"), "FILE 配置不应带出 Azure 字段: " + storage);
         assertFalse(storage.has("gcsServiceAccount"), "FILE 配置不应带出 GCS 字段: " + storage);
+    }
+
+    /**
+     * OBS / OSS 两个扩展类型的往返，并把「换存储类型」也放在这里验。
+     *
+     * <p>合并成一条是因为两者的字段高度相似（都只有 {@code endpoint} 一项定位），
+     * 「换了类型但端点没跟着换」这类错误在单类型往返里看不出来。
+     */
+    @Test
+    void obsAndOssCatalogsKeepTheirEndpointAcrossUpdates() throws Exception {
+        JsonNode created = createCatalog("obs-catalog", """
+                {"storageType":"OBS",
+                 "allowedLocations":["obs://analytics-bucket/warehouse/"],
+                 "endpoint":"obs.cn-north-4.myhuaweicloud.com"}
+                """);
+        int version = created.get("entityVersion").asInt();
+
+        JsonNode storage = created.get("storageConfigInfo");
+        assertEquals("OBS", storage.get("storageType").asString());
+        assertEquals("obs.cn-north-4.myhuaweicloud.com", storage.get("endpoint").asString());
+        assertEquals(List.of("obs://analytics-bucket/warehouse/"), strings(storage.get("allowedLocations")));
+        assertFalse(storage.has("accessKeyId"), "OBS 配置不应带出 OSS 字段: " + storage);
+        assertFalse(storage.has("roleArn"), "OBS 配置不应带出 S3 字段: " + storage);
+
+        // 换成 OSS：类型、端点、位置三者一起换
+        JsonNode updated = json(200, "PUT", M + "/catalogs/obs-catalog", """
+                {"currentEntityVersion":%d,
+                 "storageConfigInfo":{"storageType":"OSS",
+                                      "allowedLocations":["oss://analytics-bucket/warehouse/"],
+                                      "endpoint":"oss-cn-hangzhou.aliyuncs.com"}}
+                """.formatted(version));
+
+        JsonNode after = updated.get("storageConfigInfo");
+        assertEquals("OSS", after.get("storageType").asString());
+        assertEquals("oss-cn-hangzhou.aliyuncs.com", after.get("endpoint").asString());
+        assertEquals("oss://analytics-bucket/warehouse/", strings(after.get("allowedLocations")).get(0));
+        assertFalse(after.has("roleArn"), "换类型后不该混入 S3 字段: " + after);
     }
 
     // ------------------------------------------------------------------ 按类型校验
