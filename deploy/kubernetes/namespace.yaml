@@ -1,0 +1,14 @@
+# 独立命名空间，而不是塞进 default。
+#
+# 本清单会创建 Secret、StatefulSet、PVC 与 PDB，散在 default 里既不好找，
+# 也容易与集群里其它东西撞名。放进独立命名空间后：
+#   - `kubectl delete namespace paimon-rest` 能一次清干净（含 PVC）；
+#   - 可以整组施加 NetworkPolicy 或 ResourceQuota；
+#   - 资源名不必加前缀区分。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: paimon-rest
+  labels:
+    app.kubernetes.io/name: paimon-rest-server
+    app.kubernetes.io/part-of: paimon-rest

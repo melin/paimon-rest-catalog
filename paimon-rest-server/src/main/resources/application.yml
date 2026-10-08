@@ -1,0 +1,81 @@
+server:
+  port: 8080
+  # Paimon REST Catalog 客户端会把 database / table 名称作为单个 UTF-8 路径段传入，
+  # Tomcat 默认拒绝路径中的部分编码字符，这里放宽以便名称中含点号、空格等情况正常工作。
+  tomcat:
+    relaxed-path-chars: "[,]"
+    relaxed-query-chars: "[,]"
+
+spring:
+  application:
+    name: paimon-rest-server
+  # 元数据存储默认使用 MySQL。建表语句见仓库根目录的 sql/schema-mysql.sql，
+  # 首次部署需要先执行它；之后由 ddl-auto: validate 在启动时校验实体与库结构是否一致，
+  # 不一致就启动失败，而不是悄悄改表。
+  #
+  # 需要即用即丢的实例（本地调试、端到端脚本）时换用 h2 profile：
+  #   java -jar paimon-rest-server/target/paimon-rest-server-0.0.1-SNAPSHOT.jar --spring.profiles.active=h2
+  datasource:
+    url: jdbc:mysql://172.18.6.181:3306/paimon_catalog?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: root
+    password: "Root2024!@"
+    hikari:
+      maximum-pool-size: 20
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    # 刻意不设 database-platform：由 JDBC 连接自动探测，
+    # 这样 h2 / postgresql profile 与测试不需要各自覆盖方言。
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      indent-output: false
+
+# ---------------------------------------------------------------------------
+# 服务端行为配置
+# ---------------------------------------------------------------------------
+paimon:
+  rest:
+    # 目录（catalog）默认值：GET /v1/config?warehouse=X 会把 prefix 回给客户端
+    default-prefix: paimon
+    default-warehouse: file:///tmp/paimon-warehouse
+    # 未注册的 prefix 是否自动登记为一个 catalog，便于客户端零配置接入
+    auto-create-catalog: true
+    # 表路径模板，支持 {warehouse} {database} {table} 占位符
+    path-template: "{warehouse}/{database}.db/{table}"
+    # 分页默认值与上限
+    default-page-size: 100
+    max-page-size: 1000
+    auth:
+      # true 时要求 Authorization: Bearer <token>，token 需出现在 tokens 列表中
+      enabled: false
+      principal: anonymous
+      tokens: []
+      # 令牌 → 主体名映射；授权判定按主体名查授权链路，未配置的令牌退化为「令牌即主体名」
+      token-principals: {}
+    # 管理 API（/api/management/v1/**）的 RBAC 授权，默认关闭以保持既有行为
+    authorization:
+      enabled: false
+      # 服务管理员：可管理 principal 与 principal role，并可在任意 catalog 上操作角色与授权。
+      # 管理规格的权限枚举没有覆盖「管理主体」的层级，故用名单表达
+      service-admins:
+        - root
+      # 启动时预置的引导主体与引导角色链（主体 → 服务角色 → 各 catalog 的 catalog_admin）
+      bootstrap-principal: root
+      bootstrap-principal-role: service_admin
+    credential:
+      # 数据访问令牌（凭证下发）有效期
+      ttl-seconds: 3600
+    initial-catalog:
+      # 启动时预置的 catalog；留空表示不预置
+      prefix: paimon
+      warehouse: file:///tmp/paimon-warehouse
+      databases:
+        - name: default
+          options:
+            owner: paimon

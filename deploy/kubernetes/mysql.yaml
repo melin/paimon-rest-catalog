@@ -1,0 +1,204 @@
+# 元数据存储：MySQL 8.0 单实例 StatefulSet。
+#
+# 为什么是 StatefulSet 而不是 Deployment：
+# 元数据库要有稳定的网络标识与稳定的存储。StatefulSet 的 Pod 名固定（pa...-0）、
+# 卷跟着 Pod 走（volumeClaimTemplates），重建后还是同一个身份。
+# 用 Deployment + 一个独立 PVC 也能跑，但 Pod 换名换节点时卷的挂载关系要自己维持，
+# 而 StatefulSet 把这个语义交给了控制器。
+#
+# 生产环境应当换成托管数据库（RDS / Cloud SQL）或 MySQL Operator 做的高可用集群。
+# 单实例 StatefulSet 没有主从、没有备份、节点故障即不可用，
+# 它的定位是「让整套清单在一个测试集群里跑起来」。
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: paimon-mysql
+  labels:
+    app.kubernetes.io/name: paimon-mysql
+    app.kubernetes.io/component: database
+spec:
+  # headless：StatefulSet 的 serviceName 必须是它，Pod 才能拿到稳定标识。
+  #
+  # 单副本时 headless Service 的 DNS A 记录直接指向 Pod IP，
+  # 所以服务端连 `paimon-mysql:3306` 就是连到那唯一的实例，不需要另配一个
+  # ClusterIP Service。多副本（MySQL 集群）场景才需要区分，
+  # 那种场景应当交给 Operator，而不是手写 StatefulSet。
+  clusterIP: None
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+  selector:
+    app.kubernetes.io/name: paimon-mysql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: paimon-mysql
+  labels:
+    app.kubernetes.io/name: paimon-mysql
+    app.kubernetes.io/component: database
+spec:
+  serviceName: paimon-mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paimon-mysql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paimon-mysql
+        app.kubernetes.io/component: database
+    spec:
+      # 单实例元数据库，给节点排空留出正常停机的时间。
+      # 这个值也是「运维窗口内能接受多长的数据不可用」的表达。
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        # 这里刻意**不设** runAsNonRoot / runAsUser：
+        # MySQL 官方镜像的 entrypoint 需要以 root 启动，先 chown 数据目录、
+        # 初始化数据，再降权到容器内的 mysql 用户运行真正的 mysqld。
+        # 强行指定非 root 用户会让它在初始化阶段就失败。
+        #
+        # fsGroup 取 999，与镜像里 mysql 用户的 gid 对齐。它同时服务两件事：
+        #   1. 卷的属主组变成 999，让降权后的 mysqld 能写数据目录；
+        #   2. 下面那个 emptyDir 也会带上 999 这个组，
+        #      于是 initContainer 能以 999 的身份把 DDL 放进去。
+        # 用别的值会让 entrypoint 每次启动都重新 chown 整个数据目录，
+        # 库大起来之后每次重启都要多等一截。
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        # 把镜像自带的建表语句投递到 MySQL 的初始化目录。
+        #
+        # 为什么不把 DDL 做成 ConfigMap 直接挂进去：
+        # kustomize 的 configMapGenerator 不允许引用 kustomization 目录之外的文件
+        # （防止 `..` 逃逸），要引用仓库里的 sql/schema-mysql.sql 就得
+        # 放弃 `kubectl apply -k` 或把 DDL 复制一份进 deploy/。
+        # 而复制出来的那份迟早会漂移——漂移的后果是新集群建出的表结构与代码不一致，
+        # 启动时被 ddl-auto: validate 拦下，报错却指向一个看起来没问题的文件。
+        #
+        # 走镜像里的那份还多一层好处：DDL 与 jar 来自同一次 docker build，
+        # 而 validate 校验的正是 jar 里的实体定义，两者天然同版本。
+        # 用 ConfigMap 反而可能出现「新 jar 配旧 DDL」的组合。
+        #
+        # 代价是改了 sql/schema-mysql.sql 之后必须重新构建镜像，
+        # 只更新清单不会生效。这一点写进了 README 的部署流程。
+        - name: seed-initdb
+          # 用服务端镜像，因为只有它带着 /app/sql/schema-mysql.sql。
+          image: paimon-rest-server:0.0.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            # 显式给 0644：MySQL 的 entrypoint 在 root 阶段读这个文件，
+            # 但保持与其他文件一致的权限，避免后续排查时被权限问题干扰。
+            - |
+              set -eu
+              cp /app/sql/schema-mysql.sql /seed/schema-mysql.sql
+              chmod 0644 /seed/schema-mysql.sql
+              echo "已投递建表语句：$(wc -l < /seed/schema-mysql.sql) 行"
+          securityContext:
+            # 覆盖 Pod 级：这个容器跑的是服务端镜像，但要以 999 身份运行，
+            # 才能写上面 fsGroup 建出来的那个组可写的 emptyDir。
+            # 读 /app/sql/schema-mysql.sql 不受影响——它是 world-readable 的。
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: initdb-seed
+              mountPath: /seed
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          imagePullPolicy: IfNotPresent
+          args:
+            # 与 sql/schema-mysql.sql 的表定义一致。
+            # 不用 utf8mb4 的话中文标识符与 JSON 文本会乱码，
+            # 而服务端确实会存中文的 namespace 名与表注释。
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_unicode_ci
+          env:
+            # 官方镜像的 entrypoint 用这个变量作为 root 口令。
+            # 与 paimon-rest-server 用的是同一个值——两处都指向同一个 Secret，
+            # 改口令时只需要动一处。
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: paimon-rest-credentials
+                  key: DB_PASSWORD
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - name: mysql
+              containerPort: 3306
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            # 初始化脚本目录。官方镜像的 entrypoint 只在**数据目录为空**时
+            # 执行这个目录下的 .sql / .sh 文件，于是「仅首次初始化」的语义是免费的：
+            # 不需要自己写「表是否已存在」的判断（sql/schema-mysql.sql 里的建表语句
+            # 没有 IF NOT EXISTS，重复执行会失败）。
+            #
+            # 代价是它只跑一次：之后 DDL 变了，重建 Pod 不会重跑。
+            # 升级要手工执行迁移，见 README。
+            #
+            # 只读挂载：MySQL 只需要读它。
+            - name: initdb-seed
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          # 用 mysqladmin ping 而不是探 TCP 端口：
+          # 端口通不代表能认证、能查询。ping 会真的走一次连接与鉴权。
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent
+            # 首次初始化要建库建表，给足时间：30 × 5s = 150s
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        # DDL 从服务端镜像搬到这里，再由 MySQL 在首次初始化时执行。
+        # 中转用的临时空间，Pod 生命周期内有效，没有留存价值。
+        - name: initdb-seed
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            # 元数据本身很小（18 张表），但 binlog 与慢日志会长。
+            # 这个值按时长估算，不是按表数量。
+            storage: 5Gi

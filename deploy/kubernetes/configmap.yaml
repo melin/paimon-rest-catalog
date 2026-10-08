@@ -1,0 +1,112 @@
+# 服务端配置的 K8s 覆盖层。
+#
+# 这里的文件名 application-k8s.yml 不是随便起的：Pod 通过
+# SPRING_CONFIG_ADDITIONAL_LOCATION=file:/app/config/ 把整份 ConfigMap 挂进
+# /app/config/，再通过 SPRING_PROFILES_ACTIVE=k8s 让它生效。
+# Spring 会先读镜像里的 application.yml（默认值基底），再叠加这一份，
+# 因此**这里只写 K8s 环境需要改的部分**，看这一份就知道相对默认改了什么。
+#
+# 为什么不把配置摊成环境变量（SPRING_DATASOURCE_URL=...）：
+#   - paimon.rest.initial-catalog.databases 这种嵌套列表用环境变量表达要写成
+#     PAIMON_REST_INITIALCATALOG_DATABASES_0_NAME，可读性差且容易拼错；
+#   - 环境变量散在 Deployment 的 env 列表里，看不出「生效配置长什么样」，
+#     而这份文件本身就是一份可读的配置全文。
+# 真正敏感的密码与令牌仍走 Secret 注入的环境变量，见下面的 ${...} 引用。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: paimon-rest-config
+  labels:
+    app.kubernetes.io/name: paimon-rest-server
+    app.kubernetes.io/component: server
+data:
+  application-k8s.yml: |
+    server:
+      port: 8080
+      # 优雅停机：收到 SIGTERM 后先停止接受新连接，把手上的请求处理完再退出。
+      #
+      # 不开启的后果很隐蔽：滚动更新或缩容时，Pod 被删除的那一刻在途请求直接断掉，
+      # 客户端看到连接被重置，而服务端日志里不会留任何记录——因为根本没有异常被抛出。
+      # 症状是「每次发版都有零星请求失败」，很容易被当成客户端问题。
+      shutdown: graceful
+
+    spring:
+      lifecycle:
+        # 在途请求排空的等待上限。
+        #
+        # 必须小于 Pod 的 terminationGracePeriodSeconds（本清单为 45s），
+        # 否则进程还没排空完就被 SIGKILL，等于没配。
+        # 45s 与 30s 之间留的 15s 是给 preStop 的等待与 JVM 收尾。
+        timeout-per-shutdown-phase: 30s
+      datasource:
+        # 主机名是 MySQL 那个 headless Service 的名字。同一命名空间内可直接解析，
+        # 不需要带 .paimon-rest.svc.cluster.local 后缀——写全了反而会让清单
+        # 在换命名空间时失效。
+        url: jdbc:mysql://paimon-mysql:3306/paimon_catalog?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+        username: root
+        # 密码不落在这个文件里。由 Secret 注入环境变量 DB_PASSWORD 再引用：
+        # ConfigMap 会以明文出现在 etcd、`kubectl get cm -o yaml` 与版本库里，
+        # 凭据不该进入这条路径。
+        password: "${DB_PASSWORD}"
+        hikari:
+          # 默认是 10 条，这里放宽到 20：管理 API 的批量查询会并发占连接。
+          # 注意与 MySQL 的 max_connections 一起算总账（官方镜像默认 151），
+          # 后续扩副本时要按「副本数 × 20」重新评估。
+          maximum-pool-size: 20
+      jpa:
+        hibernate:
+          # 保持 validate。表结构由 sql/schema-mysql.sql 建立，启动只做校验。
+          #
+          # 这里刻意不用 update：滚动更新期间新旧两个版本的实例会同时连库，
+          # 自动改表会让它们相互覆盖彼此的结构假设。
+          # 不一致就启动失败，宁可失败得早，也不要悄悄改出一张两边都认不出的表。
+          ddl-auto: validate
+
+    paimon:
+      rest:
+        # warehouse 是 Paimon 表数据与元数据文件的落盘位置，必须指向持久卷。
+        # 用容器内的 /tmp 会让 Pod 重建后连表数据一起丢掉——而 MySQL 里的表定义还在，
+        # 于是得到一批指向不存在文件的「幽灵表」。
+        default-warehouse: file:///var/lib/paimon/warehouse
+        initial-catalog:
+          # 启动时预置一个可直接使用的 catalog，客户端不必先调管理 API 创建。
+          prefix: paimon
+          warehouse: file:///var/lib/paimon/warehouse
+          databases:
+            - name: default
+              options:
+                owner: paimon
+        # 保留「未注册的 prefix 自动登记为 catalog」，客户端零配置即可接入。
+        # 这是有意保留的演示取舍：生产环境应当关掉（false），否则任何人用任意
+        # prefix 调一次 /v1/config 就能登记出新 catalog，在多租户下是一个越权入口。
+        auto-create-catalog: true
+        auth:
+          # 开启 Bearer 鉴权。K8s 部署通常要经 Ingress 暴露到集群外，
+          # 不开鉴权等于把管理面（创建 catalog、改授权、下发凭证）公开。
+          enabled: true
+          tokens:
+            # 令牌值来自 Secret，这里只是引用。
+            # Spring 的占位符解析作用在 value 上，所以这种写法是可靠的。
+            - "${REST_TOKEN}"
+        authorization:
+          enabled: true
+          # 本清单没有配置 token-principals 映射，因此主体名就等于令牌值，
+          # 服务管理员名单只能跟着指向同一个表达式——语义是
+          # 「持有该令牌者即服务管理员」，自举入口与令牌同源。
+          #
+          # 生产应当把令牌映射到稳定的主体名，让人和凭据解耦：
+          #   auth:
+          #     token-principals:
+          #       <令牌>: <主体名>
+          #   authorization:
+          #     service-admins: [<主体名>]
+          #
+          # 但那个映射的 key 是令牌本身，而 Spring 的属性占位符只解析 value、
+          # 不解析 key，所以填不进 ${...}——令牌必然要以明文写进配置。
+          # 这正是本清单不启用它的原因，也是 docs/authorization.md 里记录的
+          # 「与真实部署差距最大的一处边界」：长期方案是接入外部身份提供方，
+          # 而不是继续往静态配置里塞凭据。
+          service-admins:
+            - "${REST_TOKEN}"
+          bootstrap-principal: "${REST_TOKEN}"
+          bootstrap-principal-role: service_admin

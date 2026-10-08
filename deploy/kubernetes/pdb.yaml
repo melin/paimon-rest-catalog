@@ -1,0 +1,33 @@
+# Pod 中断预算：约束「自愿中断」发生时能同时停掉几个副本。
+#
+# 自愿中断指节点排空（kubectl drain）、集群升级、节点池缩容这类由人/控制器
+# 主动发起的操作。它不覆盖节点宕机这类非自愿中断——那种情况 PDB 无能为力。
+#
+# ---------------------------------------------------------------------------
+# 单副本下的取舍（这条值得读两遍）
+# ---------------------------------------------------------------------------
+# PDB 在单副本时无法同时满足两件事：
+#   - minAvailable: 1 → 任何驱逐都会让可用副本降到 0，于是 kubelet 拒绝驱逐，
+#     节点排空会**永远卡住**，且报错信息只说「被 PDB 阻止」，不解释原因；
+#   - maxUnavailable: 1 → 允许驱逐，等于没有保护，但至少排空能完成。
+#
+# 这里选 maxUnavailable: 1：与其留下一个会卡住集群运维的死结，不如显式承认
+# 单副本没有可用性冗余。真正的冗余要靠扩副本，而那需要先换掉 warehouse 的存储形态
+# （见 warehouse-pvc.yaml）。
+#
+# 扩到多副本之后，应当改成 minAvailable: 1（或副本数减一），
+# 这样滚动升级与节点排空会逐个进行，任何时刻都留有一个可用实例。
+# ---------------------------------------------------------------------------
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: paimon-rest-server
+  labels:
+    app.kubernetes.io/name: paimon-rest-server
+    app.kubernetes.io/component: server
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paimon-rest-server
+      app.kubernetes.io/component: server

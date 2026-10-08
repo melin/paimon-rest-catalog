@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>com.example</groupId>
+		<artifactId>paimon-rest-parent</artifactId>
+		<version>0.0.1-SNAPSHOT</version>
+		<relativePath>../pom.xml</relativePath>
+	</parent>
+
+	<artifactId>paimon-rest-spark</artifactId>
+	<packaging>jar</packaging>
+	<name>paimon-rest-spark</name>
+	<description>Spark SQL 语法扩展：用 SQL 管理 Paimon REST Catalog 的主体、角色与授权</description>
+
+	<!--
+		为什么需要自带的语法：Spark 3.5 的 SqlBase.g4 是封闭的。
+		它没有类似 `.*? #unsupported` 的兜底分支（statement 的最后一条可选
+		分支是 unsupportedHiveNativeCommands），因此形如 `CREATE PRINCIPAL x`
+		的语句在词法/语法阶段就会失败，无法靠 visitor 拦下来。
+		扩展点 ParserInterface 也不提供「往已有语法里加规则」的能力。
+
+		因此本模块自带一份仅描述管理语句的小语法（ManagementSql.g4），
+		在 ParserInterface.parsePlan 里优先用自己的解析器识别管理语句，
+		识别失败则原样交回 Spark 原生解析器，从而在不动 Spark 语法的前提下
+		扩展可执行的 SQL 集合。
+	-->
+
+	<dependencies>
+		<!-- Spark 与 Scala 由集群提供，编译期需要、运行期不打进包 -->
+		<dependency>
+			<groupId>org.scala-lang</groupId>
+			<artifactId>scala-library</artifactId>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.spark</groupId>
+			<artifactId>spark-sql_${scala.binary.version}</artifactId>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.spark</groupId>
+			<artifactId>spark-catalyst_${scala.binary.version}</artifactId>
+			<scope>provided</scope>
+		</dependency>
+
+		<!--
+			ANTLR 运行时由 Spark 提供（Spark 3.5.9 自带 antlr4-runtime 4.9.3）。
+			这里声明只为编译期可用；版本由父 POM 统一钉住并与 Spark 对齐。
+		-->
+		<dependency>
+			<groupId>org.antlr</groupId>
+			<artifactId>antlr4-runtime</artifactId>
+			<scope>provided</scope>
+		</dependency>
+
+		<!--
+			JSON 编解码用 Spark 自带的 Jackson 2（同名同版本由 Spark 提供）。
+			REST 客户端刻意只用 java.net.http，不引入额外的 HTTP 库。
+		-->
+		<dependency>
+			<groupId>com.fasterxml.jackson.core</groupId>
+			<artifactId>jackson-databind</artifactId>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.junit.jupiter</groupId>
+			<artifactId>junit-jupiter</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.junit.platform</groupId>
+			<artifactId>junit-platform-launcher</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!--
+			Paimon 的 Spark bundle：**只用于测试**。
+
+			为什么必须引入：本模块自己不碰 Paimon，但 `CREATE TABLE ... USING paimon`
+			这类语句要由 Paimon 的 catalog 实现来执行。要验证「Spark SQL 能通过我们的
+			REST 契约建出 Paimon 表」，就必须有真实的 Paimon 目录在类路径上——
+			用桩替代等于把被测对象换掉，验证不到契约。
+
+			bundle 自带 paimon-core、文件系统实现，并把 Jackson/Guava/netty 等
+			依赖 shade 到 `org.apache.paimon.shade.*`，因此不会与本模块的
+			Jackson 2.15.2、Spark 自带的 ANTLR 4.9.3 冲突。
+
+			运行期不打进产物：scope 是 test，发布 jar 里没有它。
+		-->
+		<dependency>
+			<groupId>org.apache.paimon</groupId>
+			<artifactId>paimon-spark-3.5_${scala.binary.version}</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!--
+			Paimon 的 Spark 扩展初始化时会引用 spark-hive 中的 HiveUDFExpressionBuilder。
+			提交到集群时 spark-hive 由发行版提供，直接跑 JUnit 时没有，因此测试期引入。
+		-->
+		<dependency>
+			<groupId>org.apache.spark</groupId>
+			<artifactId>spark-hive_${scala.binary.version}</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!--
+			本地跑 SparkSession 时的日志实现。Spark 自带 log4j2，
+			本模块只用来在测试里压低 Spark 的启动日志噪声。
+		-->
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-simple</artifactId>
+			<version>2.0.18</version>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<!--
+				1) 从 ManagementSql.g4 生成词法/语法分析器。
+
+				版本必须与父 POM 的 antlr.runtime.version 一致，也必须与目标 Spark
+				发行版自带的 antlr4-runtime 一致（详见父 POM 的说明）。代码生成版本
+				偏高时，生成的 ATN 序列化版本会高于运行时期望值，结果是**Spark 自己**
+				的 SQL 解析器在类初始化阶段就失败。
+			-->
+			<plugin>
+				<groupId>org.antlr</groupId>
+				<artifactId>antlr4-maven-plugin</artifactId>
+				<version>${antlr.runtime.version}</version>
+				<executions>
+					<execution>
+						<id>antlr</id>
+						<phase>generate-sources</phase>
+						<goals>
+							<goal>antlr4</goal>
+						</goals>
+					</execution>
+				</executions>
+				<configuration>
+					<visitor>true</visitor>
+					<listener>false</listener>
+				</configuration>
+			</plugin>
+
+			<!--
+				2) 先 javac 编译 src/main/java 与 ANTLR 生成代码，
+				   再由 scala-maven-plugin 编译 src/main/scala。
+				sendJavaToScalac=false 明确「Java 先于 Scala」，
+				避免 scalac 重复编译 Java 源导致两套 class 相互覆盖。
+			-->
+			<plugin>
+				<groupId>net.alchim31.maven</groupId>
+				<artifactId>scala-maven-plugin</artifactId>
+				<version>4.9.10</version>
+				<executions>
+					<execution>
+						<id>scala-compile</id>
+						<phase>compile</phase>
+						<goals>
+							<goal>compile</goal>
+						</goals>
+					</execution>
+					<execution>
+						<id>scala-test-compile</id>
+						<phase>test-compile</phase>
+						<goals>
+							<goal>testCompile</goal>
+						</goals>
+					</execution>
+				</executions>
+				<configuration>
+					<scalaVersion>${scala.version}</scalaVersion>
+					<sendJavaToScalac>false</sendJavaToScalac>
+					<args>
+						<arg>-deprecation</arg>
+						<arg>-feature</arg>
+					</args>
+				</configuration>
+			</plugin>
+
+			<!--
+				3) 测试：Spark 3.5 在 Java 17 上需要开放若干 JDK 内部包，
+				   这些参数通常由 spark-submit 注入，直接跑 JUnit 时要自己声明。
+
+				   还有一道 JDK 上限：本模块的测试只能在 17 / 21 上跑，不能用 24 及以上。
+				   JDK 24 永久移除了 Security Manager（JEP 486），Hadoop 的
+				   UserGroupInformation.getCurrentUser() 会抛
+				   "getSubject is not supported"，且没有任何 JVM 参数可绕过
+				   （-Djava.security.manager=allow 会让 JVM 启动即失败）。
+				   这个上限无法在这里用配置表达，因此由测试侧的 SparkJdkRequirement
+				   在建会话前拦下并说明。
+			-->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<argLine>
+						-Djava.awt.headless=true
+						--add-opens=java.base/java.lang=ALL-UNNAMED
+						--add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+						--add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+						--add-opens=java.base/java.io=ALL-UNNAMED
+						--add-opens=java.base/java.net=ALL-UNNAMED
+						--add-opens=java.base/java.nio=ALL-UNNAMED
+						--add-opens=java.base/java.util=ALL-UNNAMED
+						--add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+						--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+						--add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+						--add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+						--add-opens=java.base/sun.security.action=ALL-UNNAMED
+						--add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+					</argLine>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+</project>

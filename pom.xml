@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<groupId>com.example</groupId>
+	<artifactId>paimon-rest-parent</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<packaging>pom</packaging>
+	<name>paimon-rest-parent</name>
+	<description>Paimon REST Catalog 服务端与 Spark SQL 扩展</description>
+
+	<!--
+		聚合两个模块：
+		  paimon-rest-server  Spring Boot 实现的 REST Catalog 服务，同时承载
+		                      catalog API（/v1/**）与 Management API（/api/management/v1/**）
+		  paimon-rest-spark   基于 SparkSessionExtensions 的 SQL 语法扩展，
+		                      用 SQL 管理主体、角色与授权
+
+		聚合与继承在这里刻意分开：
+		  - 本 POM 只是聚合器，同时是 paimon-rest-spark 的父 POM；
+		  - paimon-rest-server 的父 POM 是 spring-boot-starter-parent。
+
+		如果把 spring-boot-starter-parent 提为本 POM 的父，它带来的
+		dependencyManagement 会一并作用到 Spark 模块上——例如把 Spark 依赖的
+		Jackson 2.15.2 抬到 Boot 管理的 2.21.x、把 netty / jersey 换成 Boot 的版本，
+		轻则类路径与集群不一致，重则在提交任务时 NoSuchMethodError。
+		两个模块的依赖世界本来就不同，因此不共用父 POM，只共用聚合。
+	-->
+	<modules>
+		<module>paimon-rest-server</module>
+		<module>paimon-rest-spark</module>
+	</modules>
+
+	<properties>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+		<maven.compiler.release>17</maven.compiler.release>
+
+		<!-- Spark 侧：与 Paimon / Iceberg 在 Spark 3.5 上的常用部署组合一致 -->
+		<spark.version>3.5.9</spark.version>
+		<scala.version>2.12.18</scala.version>
+		<scala.binary.version>2.12</scala.binary.version>
+		<!--
+			与 Spark 3.5.x 自带版本对齐：ANTLR 运行时、Jackson 2。
+
+			ANTLR 必须**精确**等于 Spark 发行版里的 antlr4-runtime 版本。
+			Spark 3.5.9 的 spark-sql-api 依赖 antlr4-runtime 4.9.3，其自带的
+			SqlBaseLexer/SqlBaseParser 是用 4.9.3 生成的（ATN 序列化版本 3）。
+			如果这里写更高的版本（例如 4.13.x，其 ATN 序列化版本为 4），运行时会把
+			Spark 自己的 antlr4-runtime 顶掉，于是 Spark 连普通 SQL 都解析不了：
+
+			  InvalidClassException: org.antlr.v4.runtime.atn.ATN;
+			  Could not deserialize ATN with version 3 (expected 4)
+			    at org.apache.spark.sql.catalyst.parser.SqlBaseLexer.<clinit>
+
+			也就是说 ANTLR 版本写错，受损的不是本扩展，而是整个会话的 SQL 解析。
+			升级 spark.version 时必须同步核对这个值。
+		-->
+		<antlr.runtime.version>4.9.3</antlr.runtime.version>
+		<jackson2.version>2.15.2</jackson2.version>
+		<junit.version>6.0.3</junit.version>
+		<!--
+			Paimon 的版本。
+
+			只用于 paimon-rest-spark 的**测试**（见该模块 POM 的说明）：
+			建表用例需要真实的 Paimon Spark 目录来验证「Spark SQL 能否按我们的
+			REST 契约建出表」，而本模块自身运行时不依赖 Paimon——扩展只处理
+			管理语句，其余 SQL 原样交回 Spark 原生解析器。
+
+			构件名带 Scala 二进制版本后缀（`paimon-spark-3.5_2.12`），
+			因此与 spark.version / scala.binary.version 是绑定的：
+			换 Spark 或 Scala 版本时必须同步换这里。
+		-->
+		<paimon.version>2.0.0</paimon.version>
+	</properties>
+
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.scala-lang</groupId>
+				<artifactId>scala-library</artifactId>
+				<version>${scala.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.spark</groupId>
+				<artifactId>spark-sql_${scala.binary.version}</artifactId>
+				<version>${spark.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.apache.spark</groupId>
+				<artifactId>spark-catalyst_${scala.binary.version}</artifactId>
+				<version>${spark.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.antlr</groupId>
+				<artifactId>antlr4-runtime</artifactId>
+				<version>${antlr.runtime.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>com.fasterxml.jackson.core</groupId>
+				<artifactId>jackson-databind</artifactId>
+				<version>${jackson2.version}</version>
+			</dependency>
+			<!--
+				Paimon 的 Spark bundle，自带 paimon-core / 文件系统实现 / 依赖 shade。
+				测试用，见 paimon-rest-spark/pom.xml 的说明。
+			-->
+			<dependency>
+				<groupId>org.apache.paimon</groupId>
+				<artifactId>paimon-spark-3.5_${scala.binary.version}</artifactId>
+				<version>${paimon.version}</version>
+			</dependency>
+			<!--
+				Paimon 的 Spark 扩展在初始化时引用 spark-hive 里的 HiveUDFExpressionBuilder
+				（Spark 发行版自带 spark-hive，因此提交到集群时天然可用）。
+				直接跑 JUnit 时没有这份 jar，会话会初始化失败，故测试期显式引入。
+			-->
+			<dependency>
+				<groupId>org.apache.spark</groupId>
+				<artifactId>spark-hive_${scala.binary.version}</artifactId>
+				<version>${spark.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>org.junit.jupiter</groupId>
+				<artifactId>junit-jupiter</artifactId>
+				<version>${junit.version}</version>
+			</dependency>
+			<!--
+				surefire 3.x 自己也会去解析 junit-platform-launcher；
+				显式声明可以让离线构建拿到确定版本，而不是依赖 surefire 的默认探测。
+			-->
+			<dependency>
+				<groupId>org.junit.platform</groupId>
+				<artifactId>junit-platform-launcher</artifactId>
+				<version>${junit.version}</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
+	<!--
+		本 POM 没有父 POM，因此核心插件的版本需要自己钉住，
+		否则会退回 Maven 内置的默认版本，构建结果依赖本机 Maven 版本。
+	-->
+	<build>
+		<pluginManagement>
+			<plugins>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-compiler-plugin</artifactId>
+					<version>3.15.0</version>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-surefire-plugin</artifactId>
+					<version>3.5.6</version>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-jar-plugin</artifactId>
+					<version>3.5.1</version>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-resources-plugin</artifactId>
+					<version>3.5.0</version>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-install-plugin</artifactId>
+					<version>3.1.4</version>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-clean-plugin</artifactId>
+					<version>3.5.0</version>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-deploy-plugin</artifactId>
+					<version>3.1.4</version>
+				</plugin>
+			</plugins>
+		</pluginManagement>
+	</build>
+
+</project>

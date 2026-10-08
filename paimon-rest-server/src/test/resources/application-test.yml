@@ -1,0 +1,20 @@
+# 测试专用数据源：内存 H2。
+#
+# 为什么需要这个文件：application.yml 的默认数据源已经是 MySQL，
+# 若测试沿用默认值，跑单测就必须先有一个可用的 MySQL 实例。
+# 这里把数据源换成内存 H2，测试因此不依赖任何外部服务。
+#
+# 值的选取与「切换 MySQL 之前」的默认配置完全一致（同一个内存库名、
+# 同样是 ddl-auto: update），目的是让这次数据源切换不改变测试的行为，
+# 从而能干净地判断回归是否由配置切换引入。
+#
+# 由 5 个 @SpringBootTest 类上的 @ActiveProfiles("test") 激活。
+spring:
+  datasource:
+    url: jdbc:h2:mem:paimon;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update

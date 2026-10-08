@@ -1,0 +1,18 @@
+# 内存 H2：即用即丢，适合本地调试与端到端脚本。
+#
+# 使用方式：java -jar paimon-rest-server.jar --spring.profiles.active=h2
+#
+# 与默认的 MySQL 配置有两处不同，都是有意为之：
+#   - 建表交给 ddl-auto: update，因为内存库每次启动都是空的；
+#   - 使用 H2 方言，由 Hibernate 自动探测。
+#
+# 注意内存库关闭即丢数据，不要用于任何需要留存元数据的场景。
+spring:
+  datasource:
+    url: jdbc:h2:mem:paimon;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update

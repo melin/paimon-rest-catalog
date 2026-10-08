@@ -1,0 +1,65 @@
+# 用 kustomize 把这批清单组装起来。
+#
+# 使用：
+#   kubectl apply -k deploy/kubernetes          # 直接应用
+#   kubectl kustomize deploy/kubernetes         # 只渲染，不改集群（排查用）
+#
+# 为什么用 kustomize 而不是 helm：
+# 这套清单没有被参数化分发的需求（没有多环境、多租户的取值矩阵），
+# 而 kustomize 是 kubectl 内置的，不需要额外安装任何东西。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 统一注入命名空间，因此各资源文件里都不写 namespace 字段。
+# 这样把整套清单搬到别的命名空间只需要改这一行。
+namespace: paimon-rest
+
+resources:
+  - namespace.yaml
+  - secret.yaml
+  - configmap.yaml
+  - warehouse-pvc.yaml
+  - mysql.yaml
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+  # 需要集群有 Ingress 控制器；没有就注释掉这一行。
+  - ingress.yaml
+
+# ---------------------------------------------------------------------------
+# 关于建表语句为什么没有出现在这里
+# ---------------------------------------------------------------------------
+# 直觉做法是加一段 configMapGenerator，把它挂到 MySQL 的
+# /docker-entrypoint-initdb.d 下：
+#
+#   configMapGenerator:
+#     - name: mysql-initdb
+#       files:
+#         - schema-mysql.sql=../../sql/schema-mysql.sql
+#
+# 这样行不通：kustomize 拒绝加载 kustomization 目录之外的文件
+# （报 `is not in or below ...`，是一道防止 `..` 逃逸的安全检查）。
+# 绕过它要加 --load-restrictor=LoadRestrictionsNone，那样 `kubectl apply -k`
+# 就用不了，只能改成 `kustomize build ... | kubectl apply -f -`，
+# 把一个本来开箱可用的流程变成需要额外安装工具。
+#
+# 替代方案是把 DDL 复制一份进 deploy/，但两份文件必然漂移，
+# 而漂移的后果是「新集群建出的表结构与代码不一致」——启动时才被
+# ddl-auto: validate 拦下，报错却指向一个看起来没问题的文件。
+#
+# 所以最终走的是第三条路：DDL 由 Dockerfile 打进镜像，MySQL 的 initContainer
+# 再从镜像里把它投递到初始化目录（见 mysql.yaml）。好处是 DDL 与 jar 来自
+# 同一次 docker build，而 validate 校验的正是 jar 里的实体定义，两者天然同版本。
+# 代价是改完 DDL 必须重新构建镜像，只改清单不生效。
+# ---------------------------------------------------------------------------
+
+# 给所有资源打上统一的标签，便于按整套部署去检索与清理：
+#   kubectl -n paimon-rest get all -l app.kubernetes.io/part-of=paimon-rest
+#
+# includeSelectors: false 是必要的：这个标签只用于人工检索，
+# 不该进入 Deployment / StatefulSet 的 selector。
+# 进了 selector 就变成不可变字段，后续想改标签前缀会直接 apply 失败。
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: paimon-rest

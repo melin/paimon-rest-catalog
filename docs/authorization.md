@@ -1,0 +1,251 @@
+# 访问控制：模型、判定与 catalog API 授权映射
+
+本文说明本服务如何实现 Polaris Management API 的 RBAC 模型，以及这套模型如何作用到
+Paimon REST Catalog API（`/v1/**`）上。
+
+- 规格基线：`spec/polaris-management-service.yml`
+- 权限语义出处：<https://polaris.apache.org/in-dev/unreleased/managing-security/access-control/>
+- 契约细节（端点、权限枚举、请求体形状）：`docs/management-api-contract.md`
+
+---
+
+## 1. 认证与授权是两件事
+
+服务端把它们分成两层，分别由两组配置控制：
+
+| 层 | 回答的问题 | 实现 | 配置前缀 |
+| --- | --- | --- | --- |
+| 认证 | 调用者是谁 | `BearerAuthInterceptor` 解析 `Authorization: Bearer <token>`，把令牌映射成主体名，写入 `RequestContext` | `paimon.rest.auth.*` |
+| 授权 | 这个主体能做什么 | 管理 API 在控制器内判定；catalog API 在 `AuthorizationInterceptor` 统一判定 | `paimon.rest.authorization.*` |
+
+认证的两条通路：
+
+- `paimon.rest.auth.tokens` 列出允许的令牌；
+- `paimon.rest.auth.token-principals` 给出「令牌 → 主体名」映射；**未登记的令牌退化为「令牌本身即主体名」**。
+
+`paimon.rest.auth.enabled=false`（默认）时，所有请求以 `paimon.rest.auth.principal`
+（默认 `anonymous`）通过，便于本地开发与既有部署平滑升级。
+
+> **边界**：「令牌 → 主体」映射来自静态配置。因此通过管理 API 新建的主体**不能立即**
+> 用它的 `clientId` / `clientSecret` 调用管理 API——需要先把令牌登记进配置并重启，
+> 或改由外部身份提供方签发。这是当前实现的有意留白，见文末「已知边界」。
+
+---
+
+## 2. 授权模型
+
+### 2.1 实体链路
+
+```
+principal ──(N:M)── principal role ──(N:M)── catalog role ──(1:N)── 资源授权
+                                   （catalog role 归属于某个具体 catalog）
+```
+
+- **principal**：服务主体。创建时一次性返回 `clientId` 与明文 `clientSecret`，服务端只保存摘要。
+- **principal role**：服务级角色，与 catalog 无关，可跨 catalog 复用。
+- **catalog role**：归属于某个 catalog 的角色（`/catalogs/{catalogName}/catalog-roles`）。
+- 两处都是**多对多**：一个主体可持有多个 principal role；一个 principal role 可绑定多个
+  catalog role；一个 catalog role 也可被多个 principal role 绑定。
+
+授权只加在 catalog role 上，这是关键取舍：权限的最小管理单元是 catalog role，
+主体的权限集合由它持有的角色链推导而来，而不是直接挂在主体上。
+
+### 2.2 授权的载体
+
+每条授权记录形如「某个 catalog role 在某个资源上拥有某项权限」：
+
+| `type` | 作用域 | 定位字段 |
+| --- | --- | --- |
+| `catalog` | 该 catalog 下的全部资源 | 无 |
+| `namespace` | 该命名空间及其子树 | `namespace[]` |
+| `table` / `view` / `policy` / `semantic-model` | 仅该对象 | `namespace[]` + `{tableName,viewName,policyName,semanticModelName}` |
+
+对象级定位字段名按类型不同，这是规格的设计（见 `management-api-contract.md` 第 3 节）。
+
+### 2.3 判定过程
+
+对一个「主体 + 资源 + 要求的权限」三元组：
+
+1. 由主体解析出全部 principal role，再由这些角色解析出**目标 catalog 下**的全部 catalog role；
+2. 取这些 catalog role 持有的全部授权记录；
+3. 按资源层级筛选与目标资源相关的授权——catalog 级覆盖其下所有资源，namespace 级覆盖该
+   命名空间子树，对象级只覆盖该对象；
+4. 把筛选出的权限做**蕴含展开**后判断是否覆盖所需权限。
+
+第 4 步的蕴含关系由 `PrivilegeModel` 编码，规则逐条标注了 Polaris 文档原文出处；
+**文档没有明说的不做推断**。
+
+其中两点值得单独说明：
+
+- **`*_FULL_METADATA` 按权限名前缀推导，不按规格的层级枚举取全集。**
+  规格的 6 个权限 enum 表达的是「该层级*可以授予*哪些权限」，而不是「该层级的
+  FULL_METADATA *蕴含*哪些权限」。规格的每个层级枚举里都列有 `CATALOG_MANAGE_ACCESS`，
+  Namespace 级还列有 `CATALOG_MANAGE_CONTENT` 与 `CATALOG_MANAGE_METADATA`。若把
+  `TABLE_FULL_METADATA` 直接展开成 Table 级枚举全集，一个只应写表的角色就会获得授权管理
+  能力，属于权限提升。因此按「`TABLE_FULL_METADATA` ⇒ 名称以 `TABLE_` 开头的权限」推导，
+  从而自然排除全部 `CATALOG_*` 权限。
+- **`TABLE_FULL_METADATA` 不含数据权限。** 文档明确 `TABLE_READ_DATA` 与
+  `TABLE_WRITE_DATA` 需单独授予，因此这两项从展开结果中排除。
+
+### 2.4 服务管理员
+
+管理规格的权限枚举里没有「管理主体与 principal role」这一层权限，说明 Polaris 把这类操作
+交给服务管理员而不是权限判定。因此本实现用名单表达：
+
+- `paimon.rest.authorization.service-admins`（默认 `[root]`）：名单内的主体可管理 principal 与
+  principal role，并可在任意 catalog 上操作角色与授权；
+- `paimon.rest.authorization.bootstrap-principal`（默认 `root`）与
+  `bootstrap-principal-role`（默认 `service_admin`）：启动时预置的引导链
+  「主体 → 服务角色 → 各 catalog 的 `catalog_admin`」。
+
+没有这条引导链，全新部署里没有任何主体能创建第一个主体，授权体系无法自举。
+`credential-rotation-required` 的语义由客户端在首次登录后轮换凭据来配合，服务端只负责
+在创建时标记。
+
+---
+
+## 3. catalog API 的授权映射
+
+管理 API 的路径本身不含被操作对象（主体名、角色名都在请求体里），而 catalog API 的路径
+已经包含全部定位信息。因此两处的判定位置不同：
+
+| API | 判定位置 | 原因 |
+| --- | --- | --- |
+| `/api/management/v1/**` | 控制器内 | 实体名来自请求体，拦截器在此时拿不到 |
+| `/v1/**` | `AuthorizationInterceptor` 统一判定 | 路径中已含 prefix、database、table 等全部定位信息 |
+
+catalog API 的「路径 → 所需权限」映射集中在 `CatalogAccessRules` 一张表里，而不是分散到
+各控制器的注解上。这样做的理由是**未登记的路径会被拒绝，而不是被放行**：
+
+- 拦截器解析出 `Requirement` 后调用授权判定；解析不出映射时直接返回 403，并在消息中说明
+  「该端点没有登记授权规则」；
+- 忘记给新端点登记映射，会在第一次调用时立刻暴露为 403，而不是静默放行；
+- 测试 `CatalogEndpointAuthorizationTests` 从运行时的 `RequestMappingHandlerMapping` 里枚举
+  全部 `/v1/{prefix}/**` 端点，逐一核对是否已登记映射，新增端点若未登记会让构建失败。
+
+映射的粒度选择（摘要）：
+
+| 端点形态 | 要求的权限 |
+| --- | --- |
+| `GET /v1/config` | 无（唯一的公开端点） |
+| `GET /databases` | `NAMESPACE_LIST` |
+| `POST /databases` | `NAMESPACE_CREATE` |
+| `GET /databases/{db}` | `NAMESPACE_READ_PROPERTIES` |
+| `DELETE /databases/{db}` | `NAMESPACE_DROP` |
+| `POST /databases/{db}` | `NAMESPACE_WRITE_PROPERTIES` |
+| `GET .../tables` | `TABLE_LIST` |
+| `POST .../tables`、`.../register` | `TABLE_CREATE` |
+| `GET .../tables/{t}` | `TABLE_READ_PROPERTIES` |
+| `POST .../tables/{t}` | `TABLE_WRITE_PROPERTIES` |
+| `DELETE .../tables/{t}` | `TABLE_DROP` |
+| `.../tables/{t}/commit`、`/rollback` | `TABLE_WRITE_DATA` |
+| `.../tables/{t}/token`、`/auth` | `TABLE_READ_DATA` |
+| `.../partitions/list*` | `TABLE_READ_DATA` |
+| `.../partitions/drop`、`/mark` | `TABLE_WRITE_DATA` |
+| `.../branches`、`.../tags`、`.../snapshot(s)` | 读 `TABLE_READ_PROPERTIES`、写 `TABLE_WRITE_PROPERTIES` |
+| `.../views/**` | `VIEW_*` |
+| `.../semantic-views/**` | `SEMANTIC_MODEL_*` |
+| `GET /tables`（跨命名空间列举） | `TABLE_LIST`，作用域为 catalog 级 |
+| `POST /tables/rename` | `TABLE_WRITE_PROPERTIES` |
+| `GET /tables/id/{id}` | `TABLE_READ_PROPERTIES`，作用域为 catalog 级 |
+
+两处需要说明的取舍：
+
+- **函数端点使用 `NAMESPACE_*` 权限。** 规格没有为函数单独定义权限层级，因此不发明新的权限
+  取值，按命名空间级权限判定。
+- **按 id 查表只认 catalog 级授权。** 该端点跨命名空间定位表，路径里没有 `{database}`，
+  无法确定命名空间作用域，因此只接受 catalog 级（或更宽）的授权。
+
+### 3.1 403 与 404 的优先级
+
+授权判定在 catalog 不存在时**先行放行**，让后续流程返回 404。理由是：如果把「资源不存在」
+也判成 403，调用者将无法区分「我没有权限」和「这个 catalog 根本不存在」，排查成本会显著上升。
+catalog 存在但主体无权时仍返回 403。
+
+---
+
+## 4. 配置项
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `paimon.rest.auth.enabled` | `false` | 是否要求 `Authorization: Bearer <token>` |
+| `paimon.rest.auth.principal` | `anonymous` | 认证关闭或未带令牌时使用的主体名 |
+| `paimon.rest.auth.tokens` | 空 | 允许的令牌列表 |
+| `paimon.rest.auth.token-principals` | 空 | 令牌 → 主体名映射；未登记的令牌退化为「令牌即主体名」 |
+| `paimon.rest.authorization.enabled` | `false` | 是否对管理 API 与 catalog API 启用 RBAC 判定 |
+| `paimon.rest.authorization.service-admins` | `[root]` | 服务管理员主体名单 |
+| `paimon.rest.authorization.bootstrap-principal` | `root` | 启动时预置的引导主体；留空则不预置 |
+| `paimon.rest.authorization.bootstrap-principal-role` | `service_admin` | 启动时预置的引导角色链 |
+
+`authorization.enabled=false` 时不做 RBAC 判定，认证仍然生效——即所有请求以读取到的
+主体名通过，便于在既有部署上先只做认证。
+
+---
+
+## 5. 走通一次授权
+
+以下流程基于 `scripts/e2e-spark-sql.sh` 与 `scripts/management-sweep.sh` 使用的配置，
+服务端以 `root` 为服务管理员启动。
+
+```bash
+M=http://127.0.0.1:8080/api/management/v1
+AUTH='Authorization: Bearer root'
+J='Content-Type: application/json'
+
+# 1) 建主体（返回的一次性 clientSecret 只出现这一次）
+curl -s -X POST -H "$AUTH" -H "$J" \
+  -d '{"principal":{"name":"etl","properties":{"team":"data"}}}' "$M/principals"
+
+# 2) 建 principal role 与 catalog role
+curl -s -X POST -H "$AUTH" -H "$J" \
+  -d '{"principalRole":{"name":"etl_reader"}}' "$M/principal-roles"
+curl -s -X POST -H "$AUTH" -H "$J" \
+  -d '{"catalogRole":{"name":"reader"}}' "$M/catalogs/paimon/catalog-roles"
+
+# 3) 装角色：主体 → principal role → catalog role
+curl -s -X PUT -H "$AUTH" -H "$J" \
+  -d '{"principalRole":{"name":"etl_reader"}}' "$M/principals/etl/principal-roles"
+curl -s -X PUT -H "$AUTH" -H "$J" \
+  -d '{"catalogRole":{"name":"reader"}}' \
+  "$M/principal-roles/etl_reader/catalog-roles/paimon"
+
+# 4) 授权：命名空间级读 + 表级读数据
+curl -s -X PUT -H "$AUTH" -H "$J" \
+  -d '{"grant":{"type":"namespace","namespace":["default"],"privilege":"NAMESPACE_LIST"}}' \
+  "$M/catalogs/paimon/catalog-roles/reader/grants"
+curl -s -X PUT -H "$AUTH" -H "$J" \
+  -d '{"grant":{"type":"table","namespace":["default"],"tableName":"orders",
+                "privilege":"TABLE_READ_DATA"}}' \
+  "$M/catalogs/paimon/catalog-roles/reader/grants"
+
+# 5) 核对
+curl -s -H "$AUTH" "$M/catalogs/paimon/catalog-roles/reader/grants"
+
+# 6) 用该主体的令牌访问 catalog API
+#    注意：令牌必须在 paimon.rest.auth.token-principals 里登记过（键为令牌，值为主体名）
+curl -s -X POST -H "Authorization: Bearer etl-token" -H "$J" \
+  -d '{"name":"sales","options":{}}' "http://127.0.0.1:8080/v1/paimon/databases"
+# -> 403：reader 只有 NAMESPACE_LIST，没有 NAMESPACE_CREATE
+```
+
+用 Spark SQL 完成同样的操作见 `docs/spark-sql-extension.md`。
+
+---
+
+## 6. 已知边界
+
+按优先级排列，均为当前实现有意留出的边界：
+
+1. **令牌 → 主体映射是静态配置。** 新建主体无法立即取到可用的调用令牌，需要登记配置并重启，
+   或接入外部身份提供方。这是与真实部署差距最大的一处。
+2. **`CATALOG_MANAGE_METADATA` 的蕴含未展开。** Polaris 文档只说它「enables full management of
+   the catalog, catalog roles, namespaces, and tables」，未像 `CATALOG_MANAGE_CONTENT` 那样逐项
+   列举，因此只把它作为被蕴含项，不再向下展开。
+3. **`CATALOG_FULL_METADATA` 未实现。** 文档提到该权限，但规格的权限 enum 中没有这个取值。
+   规格补上后在此处加规则即可。
+4. **行过滤与列脱敏策略未实现。** `auth` 端点返回空的过滤表达式与脱敏映射，只做列存在性校验。
+5. **授权不校验被授权对象是否存在。** 可以对尚未创建的表授予 `TABLE_READ_DATA`，授权记录先于
+   对象存在是允许的（这也是先建授权再把表接管的正常顺序）。
+6. **无权限缓存。** 每次请求按主体查授权链路，权限变更即时生效，代价是热点路径上的若干次查询。
+7. **语义模型授权的延迟语义未实现。** 文档标注为 deferred 的源表 / 视图权限校验与读时传播
+   检查不在本层表达。

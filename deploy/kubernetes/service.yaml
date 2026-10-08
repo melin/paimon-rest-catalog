@@ -1,0 +1,24 @@
+# 服务端入口。REST catalog 的客户端（Spark / Flink / Paimon CLI）连这个地址。
+#
+# 用 ClusterIP 而不是 LoadBalancer：集群内的引擎（Spark 任务、Flink 作业）
+# 走内网访问即可，把管理面暴露到公网是另一件事，应该由 Ingress 与鉴权一起决定
+# （见 ingress.yaml）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: paimon-rest-server
+  labels:
+    app.kubernetes.io/name: paimon-rest-server
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: paimon-rest-server
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  # 不做会话保持：服务端本身是无状态的，状态都在 MySQL 与 warehouse 里。
+  # 后续即便扩到多副本，也不需要在 Service 层做粘性路由。

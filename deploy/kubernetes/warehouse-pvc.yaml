@@ -1,0 +1,34 @@
+# Paimon warehouse 的持久卷。
+#
+# warehouse 里放的是表数据与 Paimon 的元数据文件（schema/、snapshot/、manifest/），
+# 也就是「数据面」本身；而 MySQL 里放的是 catalog / namespace / table 的定义。
+# 两者都要持久化：只保住 MySQL 会得到一堆指向不存在文件的表定义。
+#
+# ---------------------------------------------------------------------------
+# 这条约束比看起来重要：file:// 的 warehouse 与多副本部署不相容
+# ---------------------------------------------------------------------------
+# 用 AccessMode ReadWriteOnce 时，同一个卷只能被挂到同一个节点上。
+# 服务端扩到 2 个副本后，第二个 Pod 要么调度不到有卷的节点（Pending），
+# 要么在不同的节点上各挂各的卷——后者的表现是「建的表一会儿看得到一会儿看不到」，
+# 取决于请求落到了哪个 Pod，排查成本极高。
+#
+# 所以本清单固定 replicas: 1。
+# 要让服务端横向扩展，必须把仓库换成对象存储——服务端已支持 S3 / Azure Blob / GCS
+# （见 README「配置项」与 docs/management-api-contract.md 的 storageConfigInfo），
+# 换成 s3://... 之后不再需要这个 PVC，多副本也就没有共享问题。
+#
+# storageClassName 留空表示用集群默认的存储类。集群未配默认存储类时
+# PVC 会一直处于 Pending，需要在这里显式指定。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paimon-warehouse
+  labels:
+    app.kubernetes.io/name: paimon-rest-server
+    app.kubernetes.io/component: warehouse
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

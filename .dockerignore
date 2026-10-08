@@ -1,0 +1,36 @@
+# 构建上下文过滤。目的有两个：缩小上文体积，以及避免把宿主机的构建产物
+# 带进镜像（`COPY . .` 会把它们复制进去，然后被 mvn 的 clean 覆盖——
+# 表面无害，但会让层缓存失效的判断变得难以理解）。
+#
+# 注意：sql/schema-mysql.sql 必须保留在上下文里，Dockerfile 运行阶段要复制它。
+
+# 版本控制与编辑器
+.git
+.gitattributes
+.gitignore
+.idea
+*.iml
+*.iws
+*.ipr
+.vscode
+.DS_Store
+.DS_Store?
+
+# 构建产物（镜像内会重新构建）
+target/
+**/target/
+build/
+**/build/
+
+# 与本镜像无关的目录：文档、验收脚本、OpenAPI 规格、部署清单、示例
+docs/
+scripts/
+spec/
+deploy/
+examples/
+README.md
+HELP.md
+
+# 本地辅助文件
+.workbuddy/
+*.log

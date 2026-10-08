@@ -1,0 +1,55 @@
+# 从集群外访问 REST catalog。
+#
+# 这个文件默认在 kustomization.yaml 里是**启用**的，但只声明了一个占位 host：
+# 没有对应 DNS 记录时，Ingress 控制器会返回 404，不会影响集群内的调用。
+# 要让外部客户端（本机跑的 Spark、Paimon CLI）连上，改三处：
+#   - host：换成真实域名；
+#   - ingressClassName：换成集群实际安装的控制器（nginx / traefik / alb …）；
+#   - 如果控制器不做 TLS 终止，还需要在 ingress 里补 tls 段。
+#
+# 若集群里没有 Ingress 控制器，把这一项从 kustomization.yaml 的 resources 里删掉即可。
+# 临时验证也可以用端口转发，不需要 Ingress：
+#   kubectl -n paimon-rest port-forward svc/paimon-rest-server 8080:8080
+#
+# ---------------------------------------------------------------------------
+# 暴露到集群外的安全前提
+# ---------------------------------------------------------------------------
+# 服务端同时在 8080 上提供两个面：REST catalog（/v1/**）与管理 API
+# （/api/management/v1/**），后者能创建 catalog、改授权、下发数据访问凭证。
+# 本清单已开启 Bearer 鉴权与 RBAC 授权，但**只有** /v1/config 是豁免权限判定的，
+# 其余端点都需要有效令牌。
+#
+# 因此额外建议（本文件未实现，按需补）：
+#   - 在 Ingress 层用注解限制来源网段或接入 OAuth2 代理；
+#   - 或者干脆只暴露 /v1，管理 API 留在集群内网，
+#     用 `kubectl port-forward` 或跳板机访问——管理面的访问频率远低于数据面，
+#     不值得为它开一个公网入口。
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: paimon-rest-server
+  labels:
+    app.kubernetes.io/name: paimon-rest-server
+    app.kubernetes.io/component: server
+  annotations:
+    # nginx-ingress 的常规调优：请求体上限与后端协议。
+    # 换用其它控制器时这两条注解不生效，需要按控制器的注解体系调整。
+    nginx.ingress.kubernetes.io/proxy-body-size: 8m
+    nginx.ingress.kubernetes.io/backend-protocol: HTTP
+spec:
+  # 留空表示用集群的默认 IngressClass。
+  # 集群里装了多个控制器时必须显式填写，否则 Ingress 不会有任何控制器接管。
+  ingressClassName: nginx
+  rules:
+    - host: paimon-rest.example.com
+      http:
+        paths:
+          # 一并转发 /v1 与管理 API。若只想暴露数据面，
+          # 把这一条拆开，只保留 /v1。
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: paimon-rest-server
+                port:
+                  name: http

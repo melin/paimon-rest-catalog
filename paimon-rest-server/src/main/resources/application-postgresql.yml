@@ -1,0 +1,19 @@
+# PostgreSQL：未随本次变更做端到端验证，建表依赖 ddl-auto: update。
+#
+# 使用方式：java -jar paimon-rest-server.jar --spring.profiles.active=postgresql
+#
+# 与 MySQL 的差别：唯一约束里的 namespace_hash / spec_hash 是为 MySQL 的
+# 3072 字节索引键上限引入的，在 PostgreSQL 上同样可用（定长 64 字符），
+# 但 PostgreSQL 实例上的行为没有实机验证过，请自行确认后再用于生产。
+spring:
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:5432/paimon_catalog
+    driver-class-name: org.postgresql.Driver
+    username: paimon
+    password: paimon
+    hikari:
+      maximum-pool-size: 20
+  jpa:
+    hibernate:
+      ddl-auto: update
+    # 方言由 JDBC 连接自动探测，无需显式指定

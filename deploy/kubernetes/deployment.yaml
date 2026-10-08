@@ -1,0 +1,232 @@
+# Paimon REST Server。
+#
+# 镜像来自仓库根目录的 Dockerfile（多阶段构建，运行时是 JRE 21 + 一个 jar）：
+#   docker build -t paimon-rest-server:0.0.1 .
+#
+# imagePullPolicy 用 IfNotPresent 而不是 Always：本地构建出来的镜像没有仓库地址，
+# Always 会让 kubelet 每次都去远端拉这个不存在的 tag，结果是 ImagePullBackOff。
+# 推到镜像仓库后可以改回 Always，或直接换成带 digest 的引用。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paimon-rest-server
+  labels:
+    app.kubernetes.io/name: paimon-rest-server
+    app.kubernetes.io/component: server
+spec:
+  # 固定 1 副本，不是保守，是当前存储形态下的硬约束：
+  # warehouse 用的是 file:// + ReadWriteOnce 卷，多副本会让每个 Pod 各挂一份
+  # 不同的数据。要横向扩展必须先把仓库换成对象存储（S3 / Azure Blob / GCS），
+  # 见 warehouse-pvc.yaml 的说明。
+  replicas: 1
+  # 滚动更新时先起新 Pod 再停旧 Pod。配合 server.shutdown=graceful，
+  # 更新过程中不会有请求失败。
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paimon-rest-server
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paimon-rest-server
+        app.kubernetes.io/component: server
+    spec:
+      # 比 spring.lifecycle.timeout-per-shutdown-phase（30s）留 15s 余量，
+      # 用于 preStop 的等待与 JVM 收尾。设小了会把优雅停机截断。
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        # Dockerfile 里创建的 app 用户就是 10001，这里对齐。
+        # 用固定数字而不是名字：名字要靠镜像里的 /etc/passwd 解析，
+        # 而 kubelet 在容器启动前就要完成属主检查。
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # fsGroup 让挂载卷的属主变成这个组，否则非 root 进程写不了 PVC——
+        # 表现是启动时报 warehouse 目录不可写。
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # 等 MySQL 可用再启动服务端。
+        #
+        # 不等会怎样：服务端连接失败即退出，容器进入 CrashLoopBackOff，
+        # 靠重启慢慢等到数据库就绪。功能上「最终也能起来」，但
+        #   - 日志里一串假故障，掩盖真正的启动问题；
+        #   - CrashLoopBackOff 的退避是指数级的，最后一次重试可能要等几分钟，
+        #     部署完成时间反而更长；
+        #   - 探针失败与启动失败的信号混在一起，排查时要先分辨是哪种。
+        - name: wait-for-mysql
+          image: mysql:8.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until mysqladmin ping -h paimon-mysql -uroot -p"$DB_PASSWORD" --silent 2>/dev/null; do
+                echo "等待 MySQL 就绪…"
+                sleep 2
+              done
+              echo "MySQL 已就绪"
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: paimon-rest-credentials
+                  key: DB_PASSWORD
+          securityContext:
+            # 覆盖 Pod 级的 10001：这个 initContainer 用的是 MySQL 官方镜像，
+            # 里面存在的是 uid 999 的 mysql 用户。mysqladmin 本身以哪个 uid 都能跑，
+            # 但跟着镜像的约定走可以避免权限相关的意外。
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      containers:
+        - name: paimon-rest-server
+          image: paimon-rest-server:0.0.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # 让 Spring 读挂进来的配置覆盖层。末尾的斜杠表示「这是目录」，
+            # 去掉它 Spring 会把它当成文件路径而找不到任何东西。
+            - name: SPRING_CONFIG_ADDITIONAL_LOCATION
+              value: file:/app/config/
+            - name: SPRING_PROFILES_ACTIVE
+              value: k8s
+            # 这两个值在 ConfigMap 的 application-k8s.yml 里以 ${...} 被引用。
+            # 拆成两个来源是有意的：结构性配置在 ConfigMap（可读、可评审），
+            # 凭据在 Secret（可单独授权、不进版本库）。
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: paimon-rest-credentials
+                  key: DB_PASSWORD
+            - name: REST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: paimon-rest-credentials
+                  key: REST_TOKEN
+          # -------------------------------------------------------------------------
+          # 探针为什么用 exec + curl，而不用 httpGet
+          # -------------------------------------------------------------------------
+          # httpGet 只把 200–399 视为成功。本清单开启了鉴权，而 /v1/config 是规格里
+          # 唯一豁免权限判定的端点，未带令牌时会返回 401——用 httpGet 的话
+          # readinessProbe 永远失败，Pod 永远不会被加入 Endpoints，
+          # 表现为「容器在跑、日志正常、但 Service 没有后端」。
+          #
+          # 所以这里显式把 401/403 也算作「进程已经在处理请求」。
+          # 这个判断与 Dockerfile 里的 HEALTHCHECK 保持一致。
+          # -------------------------------------------------------------------------
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/v1/config)
+                  case "$code" in 200|401|403) exit 0 ;; *) exit 1 ;; esac
+            # 30 × 4s = 120s 上限：JVM 冷启动 + Hibernate 对 18 张表做 validate，
+            # 在资源紧张的节点上会比本地慢不少。
+            # 有 startupProbe 挡着，livenessProbe 的计时应从它成功之后才开始，
+            # 因此不需要为了「启动慢」而把 liveness 的容忍度也调大。
+            periodSeconds: 4
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/v1/config)
+                  case "$code" in 200|401|403) exit 0 ;; *) exit 1 ;; esac
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # 连续 3 次失败（约 60s）才重启。单次超时可能只是 GC 停顿或节点负载抖动，
+            # 立刻重启会把一个自愈的问题变成一次真实中断。
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/v1/config)
+                  case "$code" in 200|401|403) exit 0 ;; *) exit 1 ;; esac
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                # 这里的等待是为了让 Service 的 Endpoints 先把这个 Pod 摘掉，
+                # 再开始关进程。摘除是异步的：kube-proxy 改转发规则需要一点时间，
+                # 这段时间里仍会有新请求被转发进来。
+                # 不等待就退出的话，这些请求会打到一个已经不再监听的端口上。
+                #
+                # sleep 用 exec 形式直接调二进制，不套 sh——套了会多一个进程，
+                # 而这个进程的存在与否会影响 SIGTERM 的传递路径。
+                - sleep
+                - "5"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              # 不设 cpu limit 是有意的：JVM 的线程调度窗口与 GC 停顿对配额很敏感，
+              # 一旦被 cgroup 限流，表现是延迟尖刺而 CPU 使用率看起来并不高，
+              # 排查方向容易被带偏。用 requests 保证调度时的资源量即可。
+              #
+              # 内存必须设：Dockerfile 里的 -XX:MaxRAMPercentage=75 要以容器内存
+              # 上限为基数算堆大小，没有 limits 时 JVM 会按宿主机的物理内存来算，
+              # 在内存大的节点上会给自己开一个远超合理范围的堆。
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            # 根文件系统只读。JVM 与 Spring Boot 需要写的位置只有临时目录，
+            # 下面用 emptyDir 单独挂到 /tmp。
+            #
+            # 这一条能挡住的是一整类攻击：镜像里的任何写操作都无法落地，
+            # 例如下载 shell 脚本、改写 jar、往启动脚本里注入内容。
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: warehouse
+              mountPath: /var/lib/paimon/warehouse
+            # 只读根文件系统下必须显式提供可写的临时目录。
+            # JVM 的 hsperfdata、Tomcat 的工作目录、以及 Dockerfile 里
+            # -XX:HeapDumpPath=/tmp 指定的堆转储都落在这里。
+            #
+            # 用 emptyDir（节点本地临时空间）而不是卷：
+            # 这些内容随 Pod 生命周期存在，没有留存价值；
+            # 而且堆转储可能很大，写进 PVC 会吃掉 warehouse 的配额。
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: paimon-rest-config
+        # 表数据与 Paimon 元数据文件落在持久卷上。
+        # 这个卷同时被多个 Pod 引用时会有共享问题，见 replicas 的说明。
+        - name: warehouse
+          persistentVolumeClaim:
+            claimName: paimon-warehouse
+        - name: tmp
+          emptyDir: {}
