@@ -13,8 +13,12 @@
     （随仓库副本：`spec/rest-catalog-open-api.yaml`，运行时也可从 `/rest-catalog-open-api.yaml` 下载）
   - Management API：`spec/polaris-management-service.yml`（随仓库副本，运行时可从
     `/polaris-management-service.yml` 下载）
-- 规格规模：Catalog API **60 个端点、144 个 schema**；Management API **33 个 operation、17 条路径**
-- 元数据存储：**MySQL 8.0**（建表语句由实体生成，见 `sql/schema-mysql.sql`），
+- 规格规模：Catalog API **60 个端点、144 个 schema**
+  （端点清单见 [`docs/catalog-api-endpoints.md`](docs/catalog-api-endpoints.md)）；
+  Management API **33 个 operation、17 条路径**
+  （概览见 [`docs/management-api-overview.md`](docs/management-api-overview.md)）
+- 元数据存储：**MySQL 8.0**（建表语句由实体生成，见 `sql/schema-mysql.sql`；
+  18 张表的划分与设计取舍见 [`docs/data-model.md`](docs/data-model.md)），
   通过 JPA 访问；另有 H2 内存库与 PostgreSQL 两个 profile 可选
 - 模块：服务端（Spring Boot）+ Spark SQL 语法扩展（Scala）
 
@@ -24,15 +28,15 @@
 
 ```
 paimon-rest/
-├── Dockerfile               服务端镜像（多阶段构建，见第 11 节）
+├── Dockerfile               服务端镜像（多阶段构建，见第 8 节）
 ├── pom.xml                  聚合 POM（无父 POM，见「模块划分的取舍」）
 ├── paimon-rest-server/      Spring Boot 服务端：Catalog API + Management API
-├── paimon-rest-console/     Web 管理控制台（Vue 3 + Vite，产物构建进服务端，见第 12 节）
+├── paimon-rest-console/     Web 管理控制台（Vue 3 + Vite，产物构建进服务端，见第 9 节）
 ├── paimon-rest-spark/       Spark SQL 语法扩展：用 SQL 管理主体、角色与授权
 ├── deploy/kubernetes/       Kubernetes 部署清单（kustomize 组装，见其目录下的 README）
 ├── examples/                可运行的示例：Spark 经 Paimon REST Catalog 建表
 ├── spec/                    OpenAPI 规格副本
-├── sql/                     MySQL 建表语句（由实体生成，见第 10 节「代码生成」）
+├── sql/                     MySQL 建表语句（由实体生成，见第 7 节「代码生成」）
 ├── docs/                    设计文档、契约基线与 SQL 语法参考
 └── scripts/                 验收脚本、代码生成脚本与文档校验脚本
 ```
@@ -53,11 +57,14 @@ Maven 坐标与包名：`groupId` 为 `io.github.melin`，三个 artifact 分别
 这个全限定名就是要填进 `spark.sql.extensions` 的值，改动它等于破坏所有既有部署，
 因此与 groupId 一起固定下来。
 
-`docs/` 里九份文档的分工：
+`docs/` 里十二份文档的分工：
 
 | 文档 | 读它的时机 |
 | --- | --- |
+| [`catalog-api-endpoints.md`](docs/catalog-api-endpoints.md) | 要查 Catalog API 有哪些端点——60 个端点按资源分组，含基址、前缀与授权映射说明 |
+| [`management-api-overview.md`](docs/management-api-overview.md) | 要读 Management API——33 个 operation 落在哪几个控制器上、几处容易读错的语义 |
 | [`management-api-contract.md`](docs/management-api-contract.md) | 要查管理 API 的端点、字段、权限枚举——由规格生成，逐字对照 |
+| [`data-model.md`](docs/data-model.md) | 要改实体或看表结构——18 张表的划分、摘要列与审计列的设计理由 |
 | [`spark-sql-reference.md`](docs/spark-sql-reference.md) | 要用 SQL 管理主体与授权——语句级参考，含完整示例 |
 | [`spark-sql-extension.md`](docs/spark-sql-extension.md) | 要改这个 Spark 扩展——语法扩展的做法、两个必须知道的约束、测试分层 |
 | [`spark-paimon-rest-e2e.md`](docs/spark-paimon-rest-e2e.md) | 要让 Spark 通过本服务端建 Paimon 表——连接配置、可执行的 SQL、报错对照表 |
@@ -170,7 +177,7 @@ Management API（catalog、主体、服务角色、catalog 角色与 grants）�
 控制台**默认就要求登录**（`paimon.rest.auth.console.required=true`），
 默认账号密码 `admin/admin` —— 装好即可进入，不需要先建主体。
 登录方式有三种可同时启用（用户名密码 / 主体凭据 / 外部 IdP 的 SSO），
-也可以直接在「连接设置」里填静态令牌。完整说明见第 12 节与
+也可以直接在「连接设置」里填静态令牌。完整说明见第 9 节与
 [`docs/console.md`](docs/console.md)（控制台总览）、
 [`docs/console-table-detail.md`](docs/console-table-detail.md)（表详情页）、
 [`docs/console-auth.md`](docs/console-auth.md)（登录与鉴权）。
@@ -230,219 +237,15 @@ paimon-rest-spark/
 - **管理语句靠语法而非前缀识别**：Spark 3.5 的 SQL 语法没有兜底分支，无法用 visitor 拦截
   新关键字，因此 Spark 子模块自带一份只描述管理语句的语法，解析成功才接管，失败原样交回。
 
----
-
-## 4. 数据模型
-
-Catalog 侧：
-
-| 表 | 对应资源 | 说明 |
-| --- | --- | --- |
-| `paimon_catalog` | catalog | prefix、warehouse、defaults / overrides |
-| `paimon_database` | database | 命名空间、位置、属性 |
-| `paimon_table` | table | 当前 schema、路径、类型、最新快照指针 |
-| `paimon_table_schema` | schema 历史版本 | 支撑 `rollback-schema` |
-| `paimon_snapshot` | snapshot / TableSnapshot | 清单指针 + 聚合统计 |
-| `paimon_branch` | branch | 指向快照的命名历史线 |
-| `paimon_tag` | tag | 快照的稳定别名与保留时长 |
-| `paimon_partition` | partition | spec、统计、done 标记、选项 |
-| `paimon_view` | view | 字段、查询语句、方言映射 |
-| `paimon_function` | function | 入参/出参/定义体/属性 |
-| `paimon_consumer` | consumer | 流式消费位点 |
-| `paimon_semantic_view` | semantic view | 格式 + 全文定义 |
-
-管理侧（RBAC）：
-
-| 表 | 对应资源 | 说明 |
-| --- | --- | --- |
-| `paimon_principal` | principal | 主体；只保存密钥摘要，明文仅在创建 / 轮换时返回一次 |
-| `paimon_principal_role` | principal role | 服务级角色，与 catalog 无关 |
-| `paimon_catalog_role` | catalog role | 归属于某个 catalog 的角色 |
-| `paimon_principal_role_grant` | 主体 ↔ principal role | 多对多关联 |
-| `paimon_catalog_role_grant` | principal role ↔ catalog role | 多对多关联 |
-| `paimon_resource_grant` | catalog role 的资源授权 | 权限取值 + 资源类型 + 命名空间 + 对象名 |
-
-共 18 张表、18 个 JPA 仓储接口，建表语句见 [`sql/schema-mysql.sql`](sql/schema-mysql.sql)。
-
-### 4.1 为什么有两个摘要列
-
-`paimon_partition.spec_hash` 与 `paimon_resource_grant.namespace_hash` 是各自「键」字段的
-SHA-256 定长摘要，唯一约束落在摘要上而不是原文上。原因是 MySQL 的索引键上限是
-**3072 字节**（utf8mb4 下 768 个字符）：
-
-- `spec_key` 声明为 1024 字符 → 与 `table_id` 相加远超上限；
-- `namespace_key` 是命名空间路径的拼接，而规格对层级数没有上限，长度本就无界；
-- 这两者与 `catalog_role_id` / `object_name` 等列合起来更放不下。
-
-直接建索引会被 MySQL 拒绝：
-
-```
-ERROR 1071 (42000): Specified key was too long; max key length is 3072 bytes
-```
-
-改法是「原文入库 + 摘要入索引」：`spec_key` / `namespace_key` 保留，供等值查询使用；
-唯一约束改用定长 64 字符的摘要，索引长度与值的实际长度解耦，唯一性语义不变。
-摘要在 `@PrePersist` / `@PreUpdate` 里由原文重算（见 `Digests`），因此不依赖调用方是否记得规范化。
+两份 API 与元数据的清单不在本文展开：Catalog API 的
+[60 个端点](docs/catalog-api-endpoints.md)、Management API 的
+[33 个 operation 概览](docs/management-api-overview.md)（逐字契约见
+[`management-api-contract.md`](docs/management-api-contract.md)）、以及
+[18 张表的数据模型与设计取舍](docs/data-model.md)。
 
 ---
 
-## 5. Catalog API 端点清单（60）
-
-### 配置（1）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/config` |
-
-### database（5）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/{prefix}/databases` |
-| POST | `/v1/{prefix}/databases` |
-| GET | `/v1/{prefix}/databases/{database}` |
-| POST | `/v1/{prefix}/databases/{database}` |
-| DELETE | `/v1/{prefix}/databases/{database}` |
-
-### 表与快照（18）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/{prefix}/databases/{database}/tables` |
-| POST | `/v1/{prefix}/databases/{database}/tables` |
-| GET | `/v1/{prefix}/databases/{database}/table-details` |
-| POST | `/v1/{prefix}/databases/{database}/register` |
-| GET | `/v1/{prefix}/tables` |
-| GET | `/v1/{prefix}/tables/id/{tableId}` |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}` |
-| DELETE | `/v1/{prefix}/databases/{database}/tables/{table}` |
-| POST | `/v1/{prefix}/tables/rename` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/commit` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/rollback` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/rollback-schema` |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/snapshot` |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/snapshots` |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/snapshots/{version}` |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/token` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/auth` |
-
-### 分区（6）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/partitions` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/partitions` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/partitions/drop` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/partitions/mark` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/partitions/list-by-names` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/partitions/list-by-filter` |
-
-### 分支（5）与标签（4）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/branches` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/branches` |
-| DELETE | `/v1/{prefix}/databases/{database}/tables/{table}/branches/{branch}` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/branches/{branch}/rename` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/branches/{branch}/forward` |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/tags` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/tags` |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/tags/{tag}` |
-| DELETE | `/v1/{prefix}/databases/{database}/tables/{table}/tags/{tag}` |
-
-### 消费者（2）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/{prefix}/databases/{database}/tables/{table}/consumers` |
-| POST | `/v1/{prefix}/databases/{database}/tables/{table}/consumers/reset` |
-
-### 视图（8）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/{prefix}/databases/{database}/views` |
-| POST | `/v1/{prefix}/databases/{database}/views` |
-| GET | `/v1/{prefix}/databases/{database}/view-details` |
-| GET | `/v1/{prefix}/views` |
-| GET | `/v1/{prefix}/databases/{database}/views/{view}` |
-| POST | `/v1/{prefix}/databases/{database}/views/{view}` |
-| DELETE | `/v1/{prefix}/databases/{database}/views/{view}` |
-| POST | `/v1/{prefix}/views/rename` |
-
-### 函数（7）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/{prefix}/databases/{database}/functions` |
-| POST | `/v1/{prefix}/databases/{database}/functions` |
-| GET | `/v1/{prefix}/databases/{database}/function-details` |
-| GET | `/v1/{prefix}/functions` |
-| GET | `/v1/{prefix}/databases/{database}/functions/{function}` |
-| POST | `/v1/{prefix}/databases/{database}/functions/{function}` |
-| DELETE | `/v1/{prefix}/databases/{database}/functions/{function}` |
-
-### 语义视图（4，实验性）
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/v1/{prefix}/databases/{database}/semantic-views` |
-| GET | `/v1/{prefix}/databases/{database}/semantic-views/{semanticView}` |
-| POST | `/v1/{prefix}/databases/{database}/semantic-views/{semanticView}` |
-| DELETE | `/v1/{prefix}/databases/{database}/semantic-views/{semanticView}` |
-
----
-
-## 6. Management API（33 个 operation）
-
-基址 `http://localhost:8080/api/management/v1`，与 Catalog API 由同一进程承载。
-端点清单、请求体形状、权限枚举、资源模型以及**逐 operation 的响应形状与状态码**见
-[`docs/management-api-contract.md`](docs/management-api-contract.md)
-（由规格生成，逐字对照，不在本文重复）。
-
-按资源分成四组：
-
-| 控制器 | operation | 覆盖 |
-| --- | --- | --- |
-| `PrincipalController` | 10 | 主体的增删改查、`reset` / `rotate` 凭据、主体 ↔ principal role 装配 |
-| `PrincipalRoleController` | 9 | principal role 的增删改查、其下的主体与 catalog role 查询、catalog role 装配 |
-| `CatalogRoleController` | 9 | catalog role 的增删改查、其下的 principal role 与资源授权 |
-| `ManagementCatalogController` | 5 | 管理面的 catalog 列表、创建、查询、更新、删除 |
-
-关键语义（详细说明与设计理由见 [`docs/authorization.md`](docs/authorization.md)）：
-
-- **RBAC 链路**：主体 → principal role → catalog role → 资源授权。两级都是多对多，
-  catalog role 归属于某个具体 catalog。
-- **权限蕴含**由 `PrivilegeModel` 编码，规则逐条标注 Polaris 文档出处，文档未明说的不做推断；
-  `*_FULL_METADATA` 按权限名前缀推导而非取规格的层级枚举全集，以避免权限提升。
-- **乐观并发**：`PUT` 请求携带 `currentEntityVersion`，与当前版本不符时返回 `409`。
-- **状态码**：创建与授予类 `201`，`PUT` 更新与 `reset` / `rotate` 为 `200`，删除为 `204`，
-  无权限 `403`，不存在 `404`，版本冲突 `409`。
-- **响应形状**：单体资源接口大多返回**裸对象**，只有主体相关接口返回
-  `{"principal":{…},"credentials":{…}}`；列表接口是具名数组。这是最容易读错的一处，
-  逐 operation 对照见 [`docs/management-api-contract.md`](docs/management-api-contract.md) 第 4 节，
-  实测结论见 [`docs/spark-sql-extension.md`](docs/spark-sql-extension.md) 第 3.3 节。
-- **规格遗漏**：`GET /catalogs/{name}/catalog-roles` 与
-  `GET /catalogs/{name}/catalog-roles/{role}/grants` 在规格中只声明了 `200`，
-  没有 `403` / `404`；本实现按失败关闭处理，仍要求 `CATALOG_MANAGE_ACCESS`。
-- **存储配置支持六种类型**。`storageConfigInfo` 在规格里是按 `storageType` 判别的联合，
-  因此 Java 侧也按子类型建模（`S3` / `AZURE` / `GCS` / `OBS` / `OSS` / `FILE` 各有自己的字段集合），
-  非法组合在类型层面就不成立。`AZURE` 的 `tenantId` 按规格的 `required` 校验（缺失返回 400）；
-  `S3` 的废弃字段 `currentKmsKey` / `allowedKmsKeys` 不接收也不返回。
-  其中 `OBS`（华为云）与 `OSS`（阿里云）**不在 Polaris 规格的取值集合里**，是本工程的扩展：
-  规格把这两家云归入「兼容 S3 协议的对象存储」，靠自定义 `endpoint` 接入，
-  单列它们是为了让凭据下发能产出厂商原生的 `fs.obs.*` / `fs.oss.*` 键族。
-  超出规格的只是 `storageType` 的取值集合，REST Catalog 协议不受影响——引擎只原样透传这个字段。
-  落库时整份配置存进一列 JSON，`storage_type` 与 `allowed_locations_json` 是它的投影列，
-  便于直接用 SQL 筛选。`allowedLocations` 的首项即该 catalog 的仓库位置，
-  表路径由它推导——改存储会同时改新库表的位置。
-  实现细节与实测结论见 [`docs/management-api-contract.md`](docs/management-api-contract.md) 第 3.4 节。
-
----
-
-## 7. Spark SQL 扩展
+## 4. Spark SQL 扩展
 
 `paimon-rest-spark` 把管理 API 接进 Spark SQL，21 条语句覆盖主体、角色、授权与查询：
 
@@ -460,7 +263,7 @@ SHOW GRANTS FOR CATALOG ROLE reader IN CATALOG paimon;
 [`docs/spark-sql-extension.md`](docs/spark-sql-extension.md)。
 
 参考文档里的内容不是手写断言，而是有机械校验兜底：`scripts/verify-spark-sql-doc.py`
-比对文档与语法文件、规格、客户端代码，第 11 节的示例还会被 `SparkSqlDocExamplesTests`
+比对文档与语法文件、规格、客户端代码，参考文档第 11 节的示例还会被 `SparkSqlDocExamplesTests`
 对着真实服务端执行一遍——**改坏示例会让构建失败**。
 
 两个必须知道的约束：
@@ -475,7 +278,7 @@ SHOW GRANTS FOR CATALOG ROLE reader IN CATALOG paimon;
 
 ---
 
-## 8. 配置项
+## 5. 配置项
 
 Catalog 侧与鉴权：
 
@@ -490,7 +293,7 @@ Catalog 侧与鉴权：
 | `paimon.rest.auth.enabled` | `false` | 是否要求数据接口带 Bearer 令牌（`/v1/**`、`/api/catalog/v1/**`、`/api/management/v1/**`） |
 | `paimon.rest.auth.principal` | `anonymous` | 认证关闭或未带令牌时使用的主体名 |
 | `paimon.rest.auth.tokens` | 空 | 允许的静态令牌列表（给机器用） |
-| `paimon.rest.auth.token-principals` | 空 | 静态令牌 → 主体名映射；未登记时退化为「令牌即主体名」（审计列放不下的长度会记摘要，见第 9 节第 19 条） |
+| `paimon.rest.auth.token-principals` | 空 | 静态令牌 → 主体名映射；未登记时退化为「令牌即主体名」（审计列放不下的长度会记摘要，见第 6 节第 19 条） |
 | `paimon.rest.auth.access-token.ttl` | `1h` | 控制台签发的访问令牌有效期（唯一能限制令牌泄露窗口的参数） |
 | `paimon.rest.auth.access-token.signing-key` | 空 | HS256 签名密钥，Base64 且解码后 ≥32 字节；**留空则每次启动随机生成**（多实例互不认、重启掉线），生产必须配 |
 | `paimon.rest.auth.console.required` | `true` | 浏览器进控制台是否必须先登录。**只作用于控制台界面与 `/api/console/v1/**`，不是安全边界** |
@@ -595,7 +398,7 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
 
 ---
 
-## 9. 实现说明与已知边界
+## 6. 实现说明与已知边界
 
 以下取舍在实现时已经明确，便于按需替换：
 
@@ -669,7 +472,7 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
 
 ---
 
-## 10. 测试
+## 7. 测试
 
 ### 单元与集成测试（300 个用例）
 
@@ -693,7 +496,7 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 | `StoragePolicyApiTests` | `file-io.type=s3` 时拒绝 Azure / GCS / OBS / OSS catalog 并在报错里点明原因、接受 S3 与 FILE；`credential-manager.type=noop` 时凭据下发返回 501 |
 | `AuthorizationTests` | 权限蕴含与判定的单元行为 |
 | `CatalogEndpointAuthorizationTests` | 从运行时请求映射枚举全部 `/v1/{prefix}/**` 端点，逐一核对授权映射是否已登记——新增端点若忘记登记映射会让构建失败 |
-| `ConsoleApiTests` | 控制台的托管与元数据：`/console` 重定向、目录式路径转发入口页、深链回退、缺失 assets 仍 404、已提交入口页引用的产物都存在、meta 的枚举与权限分组跟着规格走、登录引导同时如实返回 `authEnabled` 与 `consoleRequired`、门禁开着时控制台端点拒匿名而数据面仍开放（见第 12 节） |
+| `ConsoleApiTests` | 控制台的托管与元数据：`/console` 重定向、目录式路径转发入口页、深链回退、缺失 assets 仍 404、已提交入口页引用的产物都存在、meta 的枚举与权限分组跟着规格走、登录引导同时如实返回 `authEnabled` 与 `consoleRequired`、门禁开着时控制台端点拒匿名而数据面仍开放（见第 9 节） |
 | `ConsoleAuthEndpointTests` | 控制台登录在 HTTP 层的端到端：豁免端点可达而受保护端点拒绝匿名、**用户名密码登录成功/失败/缺参/限速与默认 `admin/admin`**、令牌签发与使用、错误密钥 401 与 `WWW-Authenticate`、**clientId 与用户名两种「不存在」的报文都与「密码不对」一字不差**、`invalid_scope` / `unsupported_grant_type`、Basic 与 JSON 体、失败限速、静态令牌映射、伪造 JWT 与畸形头。这一层才会暴露接线错误——排除列表写错、响应字段名写成驼峰、令牌端点自己反被鉴权挡住 |
 | `AccessTokenServiceTests` | 访问令牌的签发与验证：claims、TTL 边界、换钥、篡改、换 issuer、无 `exp`、`alg:none`、签名密钥格式错必须启动失败、随机钥不共享 |
 | `JwtTests` | 纯 JDK 的 JWT 编解码与验签：HS256 / RS256 / ES256 往返、**ES256 的原始签名转 DER**、`alg:none` 与未知算法、结构拒绝、`aud` 单值与数组 |
@@ -802,7 +605,7 @@ python3 scripts/verify-spark-sql-doc.py
 ./scripts/gen-mysql-ddl.sh                   # sql/schema-mysql.sql
 
 # 控制台：构建产物落位 + 与服务端规格逐条比对端点
-./scripts/build-console.sh                   # 需要 Node 20+，见第 12 节
+./scripts/build-console.sh                   # 需要 Node 20+，见第 9 节
 python3 scripts/verify-console.py            # 只校验，不构建（多解释器时用 PYTHON=... 指定）
 ```
 
@@ -824,9 +627,9 @@ python3 -m pip install --user PyYAML
 
 ---
 
-## 11. 容器与 Kubernetes 部署
+## 8. 容器与 Kubernetes 部署
 
-### 11.1 镜像
+### 8.1 镜像
 
 ```bash
 docker build -t paimon-rest-server:0.0.1 .
@@ -838,7 +641,7 @@ docker build -t paimon-rest-server:0.0.1 .
 配合 Spring Boot 的优雅停机。
 
 镜像里放两样东西：jar，以及 `sql/schema-mysql.sql`。后者是给 K8s 的 initContainer
-用的——它把 DDL 投递给 MySQL 做首次初始化（见 11.2）。两样东西来自同一次构建，
+用的——它把 DDL 投递给 MySQL 做首次初始化（见 8.2）。两样东西来自同一次构建，
 因此 DDL 与 jar 里的实体定义天然同版本。
 
 构建时踩到的两个坑已经落进 Dockerfile：
@@ -848,7 +651,7 @@ docker build -t paimon-rest-server:0.0.1 .
 | 解析 `spring-boot-starter-parent` 时失败，报 `Requests from open proxy and relay services are blocked` | 某些网络环境下 Maven Central 对特定出口 IP 返回 403，而本机 mvn 正常 | 默认仓库改为 `repo1.maven.org`；换企业镜像用 `--build-arg MAVEN_MIRROR_URL=...` |
 | 容器内 `Permission denied`，报错指向 `/app/sql/schema-mysql.sql` | `COPY --chmod=0644` 会把权限也套到 Docker 自动创建的中间目录上，`/app/sql` 变成 `drw-r--r--`；目录没有 x 位就无法遍历，里面文件什么权限都读不到 | 先 `RUN mkdir -p /app/sql && chmod 0755`，再单独 `COPY` 文件 |
 
-### 11.2 Kubernetes
+### 8.2 Kubernetes
 
 `deploy/kubernetes/` 是一套用 kustomize 组装的清单：
 
@@ -881,7 +684,7 @@ python3 scripts/verify-k8s-manifests.py
 这些错误 `kubectl apply` 时都不会报，只在运行时表现成 Pod 一直 Pending
 或启动时报「解析不了占位符」。
 
-### 11.3 可运行的示例
+### 8.3 可运行的示例
 
 `examples/spark-paimon-rest/` 是一个能直接跑通的示例：自动起服务端，
 用 Spark SQL 经 Paimon REST catalog 建表，再把服务端侧的元数据打印出来。
@@ -897,7 +700,7 @@ SQL 与报错对照见 [`spark-paimon-rest-e2e.md`](docs/spark-paimon-rest-e2e.m
 
 ---
 
-## 12. Web 管理控制台
+## 9. Web 管理控制台
 
 服务端自带一个 Vue 单页应用，挂在 `/console/` 下，覆盖 Catalog API 与 Management API 两个面：
 
@@ -926,7 +729,7 @@ http://localhost:8080/console/
   引用完整性、五处基址一致、产物新鲜度、请求体形状、对话框状态、下拉候选来源）；
   服务端侧 `ConsoleApiTests` 守住静态资源托管与 SPA 深链回退。
 
-### 12.1 登录与鉴权
+### 9.1 登录与鉴权
 
 两个开关管两件不同的事：`paimon.rest.auth.console.required`（默认 `true`）只作用于控制台界面
 与 `/api/console/v1/**`；`paimon.rest.auth.enabled`（默认 `false`）管 `/v1/**`、
@@ -936,9 +739,9 @@ http://localhost:8080/console/
 这层门禁只避免「误入的人看到一堆管理表单」，**不是安全边界**——要保护数据必须开 `auth.enabled`。
 浏览器登录支持用户名密码（默认 `admin/admin`，不需要先建主体）、OAuth 客户端凭据、
 OIDC 授权码 + PKCE 三种方式；令牌是自包含 JWT，多实例互认但**无法即时撤销**。
-完整设计见 [`docs/console-auth.md`](docs/console-auth.md)，三层测试（31 / 63 / 59）用法见第 10 节。
+完整设计见 [`docs/console-auth.md`](docs/console-auth.md)，三层测试（31 / 63 / 59）用法见第 7 节。
 
-### 12.2 文档
+### 9.2 文档
 
 | 文档 | 内容 |
 | --- | --- |

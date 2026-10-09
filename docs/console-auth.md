@@ -612,7 +612,7 @@ curl -s -X POST http://localhost:8080/api/management/v1/principals \
 # 响应里的 credentials.clientId / clientSecret 就是后两个环境变量
 ```
 
-用法见 README 第 10 节「端到端验收脚本」。
+用法见 README 第 7 节「端到端验收脚本」。
 
 前端集成那一层不是重复劳动：`adopt()` 失败不回滚的 bug 会让「一次写错令牌就把正在用的
 有效令牌一起弄丢」，而它在服务端 209 个用例与静态校验里**全是绿的**——
@@ -643,7 +643,7 @@ curl -s -X POST http://localhost:8080/api/management/v1/principals \
   直接入库会以 `Data too long for column 'created_by'` 报 500。因此写入前归一化为
   `sha256:<前 12 位>`——同一个令牌得到同一个标签，可追溯，且不把凭据片段写进元数据库。
   正确的解法始终是配 `token-principals`，让审计里出现的是人名。见
-  [`../README.md`](../README.md) 第 9 节第 19 条。
+  [`../README.md`](../README.md) 第 6 节第 19 条。
 - **同一个问题也不靠「加宽审计列」来解决。** 把这三列加宽到 `varchar(512)` 挡得住控制台
   令牌（272 字符），换来的却是更糟的结果：这三列是被接口原样返回的（`TableDtos` /
   `DatabaseDtos` / `ViewDtos` / `FunctionDtos` / `PartitionDtos`），加宽后令牌**明文入库且
