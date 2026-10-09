@@ -1,7 +1,7 @@
 /*
  * 管理语句的语法扩展。
  *
- * 这份语法只描述「管理 Paimon REST Catalog 的主体、角色与授权」这一组语句，
+ * 这份语法只描述「管理 Paimon REST 的主体、角色与授权」这一组语句，
  * 不重复描述 SQL 查询。运行时它先于 Spark 原生解析器被尝试：
  * 解析成功则执行管理操作，解析失败（ParseCancellationException）则原样交回
  * Spark 的 ParserInterface，因此普通 SQL 的行为不受影响。

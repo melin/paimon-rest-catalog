@@ -1,6 +1,6 @@
 # Catalog API 端点清单
 
-Paimon REST Catalog API 在本服务端的全部 **60 个端点**，按资源分组列出。
+Paimon REST API 在本服务端的全部 **60 个端点**，按资源分组列出。
 
 - 规格来源：Apache Paimon 的 `docs/static/rest-catalog-open-api.yaml`
   （随仓库副本 `spec/rest-catalog-open-api.yaml`，运行时也可从 `/rest-catalog-open-api.yaml` 下载）

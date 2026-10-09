@@ -1,6 +1,6 @@
 server:
   port: 8080
-  # Paimon REST Catalog 客户端会把 database / table 名称作为单个 UTF-8 路径段传入，
+  # Paimon REST 客户端会把 database / table 名称作为单个 UTF-8 路径段传入，
   # Tomcat 默认拒绝路径中的部分编码字符，这里放宽以便名称中含点号、空格等情况正常工作。
   tomcat:
     relaxed-path-chars: "[,]"

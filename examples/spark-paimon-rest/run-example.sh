@@ -1,5 +1,5 @@
 #!/bin/bash
-# 一键跑通「Spark 通过 Paimon REST Catalog 建表」示例。
+# 一键跑通「Spark 通过 Paimon REST 建表」示例。
 #
 # 为什么脚本要自己起服务端：示例的意义在于「照着跑就能看到结果」。
 # 如果读者得先准备 MySQL、配数据源、手工起进程，能跑起来的概率会低很多。

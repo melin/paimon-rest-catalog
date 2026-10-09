@@ -1,5 +1,5 @@
 #!/bin/bash
-# Paimon REST Catalog 全量验收：覆盖规格中全部 60 个 operation。
+# Paimon REST 全量验收：覆盖规格中全部 60 个 operation。
 #
 # 用法：
 #   BASE=http://127.0.0.1:8080 PREFIX=paimon ./scripts/api-sweep.sh

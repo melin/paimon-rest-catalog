@@ -1,7 +1,7 @@
 # 访问控制：模型、判定与 catalog API 授权映射
 
 本文说明本服务如何实现 Polaris Management API 的 RBAC 模型，以及这套模型如何作用到
-Paimon REST Catalog API（`/v1/**`）上。
+Paimon REST API（`/v1/**`）上。
 
 - 规格基线：`spec/polaris-management-service.yml`
 - 权限语义出处：<https://polaris.apache.org/in-dev/unreleased/managing-security/access-control/>

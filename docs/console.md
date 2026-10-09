@@ -137,7 +137,7 @@ paimon-rest-console/
 | `/browse` | 目录浏览 | 左库右对象；四页签（表/视图/函数/语义视图）；建库、建表、注册表、按表 ID 定位、重命名、删除、详情抽屉 |
 | `/tables/:prefix/:database/:table` | [表详情](console-table-detail.md) | 九页签：详细信息 / Schema / 变更 / 快照 / 标签 / 分支 / 分区 / 权限 / 数据访问；含**变更构造器**、快照与标签的**回滚**、表级 grants 的增删 |
 | `/catalogs` | Catalog 管理 | 列出 / 创建 / 详情 / 更新（带版本）/ 删除 |
-| `/principals` | 主体 | 列出 / 创建 / 更新 / 删除 / rotate / reset；授予与撤销服务角色 |
+| `/principals` | 主体 | 列出 / 创建 / 更新 / 删除 / rotate / reset；授予与撤销服务角色。创建、轮换、重置后的凭据弹窗可一键导出 JSON 文件（`{principal, clientId, clientSecret}`，文件名 `<主体>-credentials.json`），密钥仍只在弹窗期间可见 |
 | `/principal-roles` | 服务角色 | 列出 / 创建 / 更新 / 删除；查看成员；授予与撤销 catalog 角色 |
 | `/catalog-roles` | Catalog 角色与授权 | 角色 CRUD；查看授予了该角色的服务角色；**grants 的增删**（按资源类型分组渲染权限） |
 | `/settings` | 连接设置 | API 基址、访问令牌、登录状态、主题；`/api/console/v1/meta` 原始响应 |

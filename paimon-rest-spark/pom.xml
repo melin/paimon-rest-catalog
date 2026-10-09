@@ -13,7 +13,7 @@
 	<artifactId>paimon-rest-spark</artifactId>
 	<packaging>jar</packaging>
 	<name>paimon-rest-spark</name>
-	<description>Spark SQL 语法扩展：用 SQL 管理 Paimon REST Catalog 的主体、角色与授权</description>
+	<description>Spark SQL 语法扩展：用 SQL 管理 Paimon REST 的主体、角色与授权</description>
 
 	<!--
 		为什么需要自带的语法：Spark 3.5 的 SqlBase.g4 是封闭的。

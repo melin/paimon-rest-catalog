@@ -1,4 +1,4 @@
-# Paimon REST Catalog Server（Spring Boot + JPA）
+# Paimon REST Server（Spring Boot + JPA）
 
 使用 Spring Boot 与 JPA 实现 Apache Paimon 的 **REST Catalog API**（OpenAPI 规格 v1）。
 服务扮演目录（catalog）角色：集中保存 database、表 schema、快照、分支、标签、分区、
@@ -34,7 +34,7 @@ paimon-rest/
 ├── paimon-rest-console/     Web 管理控制台（Vue 3 + Vite，产物构建进服务端，见第 9 节）
 ├── paimon-rest-spark/       Spark SQL 语法扩展：用 SQL 管理主体、角色与授权
 ├── deploy/kubernetes/       Kubernetes 部署清单（kustomize 组装，见其目录下的 README）
-├── examples/                可运行的示例：Spark 经 Paimon REST Catalog 建表
+├── examples/                可运行的示例：Spark 经 Paimon REST 建表
 ├── spec/                    OpenAPI 规格副本
 ├── sql/                     MySQL 建表语句（由实体生成，见第 7 节「代码生成」）
 ├── docs/                    设计文档、契约基线与 SQL 语法参考
@@ -519,7 +519,7 @@ Spark 子模块（76 个，其中 14 个需要显式指向服务端）：
 | `ManagementApiClientTests` | 请求方法与路径、请求体字段形状、路径段编码、`ALTER` 的读-合并-回写、单资源裸对象与状态码、错误映射 |
 | `ManagementSqlExecutionTests` | 真实 `SparkSession` + 桩服务端：扩展是否真被加载、`spark.sql` 是否真执行命令、结果行列名、原生 SQL 不受影响 |
 | `ManagementSqlLiveServerTests` | 对真实服务端跑完整 SQL 链路（默认跳过，见下） |
-| `PaimonTableDdlTests` | 用 Spark SQL 经 Paimon REST catalog 建表：分区 append 表与主键表（含分区主键）、`LIKE`、`IF NOT EXISTS` 幂等与裸建冲突、内联主键约束与保留表属性被 Spark 拒绝、库不存在时报错，以及 `CTAS` 因数据面缺失而失败的守卫用例；两种断言并重——`DESCRIBE` / `SHOW CREATE TABLE` 的输出，以及直接读服务端元数据核对注释、分区键、主键与选项（默认跳过，见下） |
+| `PaimonTableDdlTests` | 用 Spark SQL 经 Paimon REST 建表：分区 append 表与主键表（含分区主键）、`LIKE`、`IF NOT EXISTS` 幂等与裸建冲突、内联主键约束与保留表属性被 Spark 拒绝、库不存在时报错，以及 `CTAS` 因数据面缺失而失败的守卫用例；两种断言并重——`DESCRIBE` / `SHOW CREATE TABLE` 的输出，以及直接读服务端元数据核对注释、分区键、主键与选项（默认跳过，见下） |
 | `SparkSqlDocExamplesTests` | 抽出 `docs/spark-sql-reference.md` 第 11 节的示例并逐条执行，断言撤销语义与清理结果（默认跳过，见下） |
 | `PaimonRestManagementTests` | 配置解析的容错 |
 
@@ -692,7 +692,7 @@ python3 scripts/verify-k8s-manifests.py
 ### 8.3 可运行的示例
 
 `examples/spark-paimon-rest/` 是一个能直接跑通的示例：自动起服务端，
-用 Spark SQL 经 Paimon REST catalog 建表，再把服务端侧的元数据打印出来。
+用 Spark SQL 经 Paimon REST 建表，再把服务端侧的元数据打印出来。
 
 ```bash
 ./mvnw -o install -DskipTests      # 只需一次
