@@ -14,11 +14,29 @@ public class ApiException extends RuntimeException {
     private final ResourceType resourceType;
     private final String resourceName;
 
+    /**
+     * 协议级错误码。
+     *
+     * <p>只有「对外按外部规范应答」的端点会用到它——目前是 OAuth 令牌端点，
+     * 它必须按 RFC 6749 第 5.2 节给出 {@code error} 取值。其余端点用
+     * {@link #getStatus()} 就够了，这里保持 {@code null}。
+     *
+     * <p>它**不进错误响应体**：{@code ErrorResponse} 是本工程自己的形状，
+     * 不会因为多了这个字段而改变。因此加它对既有契约没有影响。
+     */
+    private final String errorCode;
+
     public ApiException(int status, ResourceType resourceType, String resourceName, String message) {
+        this(status, resourceType, resourceName, message, null);
+    }
+
+    public ApiException(int status, ResourceType resourceType, String resourceName, String message,
+                        String errorCode) {
         super(message);
         this.status = status;
         this.resourceType = resourceType;
         this.resourceName = resourceName;
+        this.errorCode = errorCode;
     }
 
     public static ApiException databaseNotExist(String database) {
@@ -86,6 +104,19 @@ public class ApiException extends RuntimeException {
 
     public static ApiException badRequest(String message) {
         return new ApiException(400, null, null, message);
+    }
+
+    /**
+     * 按外部规范报错：带上协议自己的错误码。
+     *
+     * <p>目前的唯一使用者是 OAuth 令牌端点。为什么不直接用状态码表达：
+     * RFC 6749 第 5.2 节把「scope 取值不支持」与「请求缺参数」分成
+     * {@code invalid_scope} 与 {@code invalid_request} 两个码，而两者的
+     * HTTP 状态都是 400——状态码承载不了这个区别，通用 OAuth 客户端库
+     * 又只看 {@code error}，所以必须把它一路带出来。
+     */
+    public static ApiException protocolError(int status, String errorCode, String message) {
+        return new ApiException(status, null, null, message, errorCode);
     }
 
     public static ApiException forbidden(String message) {

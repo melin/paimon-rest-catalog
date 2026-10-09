@@ -84,6 +84,68 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 			</plugin>
+			<!--
+				把版本号写进 jar 清单的 Implementation-Version。
+
+				用途只有一处：控制台的元数据端点要把服务端版本报给前端展示（见
+				ConsoleMetaService#version）。maven-jar-plugin 默认不带这个条目，
+				读取结果为 null，前端就只能显示「未知版本」——排查问题时
+				「这个控制台连的是哪个版本的服务端」是第一个要被回答的问题。
+
+				这里用 jar 插件而不是 spring-boot:build-info：后者还会写入构建时间，
+				同一个 commit 重复构建会产出不同的字节，与「构建可复现」相冲突，
+				而版本号本身是稳定的。
+			-->
+			<!--
+				每次构建前清掉 target/classes 里那份控制台产物。
+
+				为什么要这么做：控制台的构建产物按内容哈希命名（index-CG9zHvOr.js 这种），
+				每次前端重建文件名都会变，而 maven-resources-plugin 只做「复制/覆盖」，
+				从不删除 target 里已经不存在于 src 的文件。于是增量执行 package 时，
+				target/classes/static/console 会累积历次构建的旧文件——
+				实测一次增量构建就多出 20 个死文件（含上一版 1.1 MB 的 index chunk），
+				打进 jar 里就是白白胖胖的几 MB，而且看 jar 内容会误以为有两个入口 chunk。
+
+				Dockerfile 走的是 clean package，镜像不受影响；受影响的是本地
+				改完控制台后只跑 package 的场景，而那恰好是最常见的场景。
+
+				绑到 initialize：早于 process-resources，所以随后的复制是干净的一次。
+				excludeDefaultDirectories 置真，避免误删整个 target（clean 的默认行为）。
+				故意不删 target/classes 本身——那会连带清掉编译输出，
+				把增量构建变成全量构建。
+			-->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-clean-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>clean-derived-console-assets</id>
+						<phase>initialize</phase>
+						<goals>
+							<goal>clean</goal>
+						</goals>
+						<configuration>
+							<excludeDefaultDirectories>true</excludeDefaultDirectories>
+							<filesets>
+								<fileset>
+									<directory>${project.build.outputDirectory}/static/console</directory>
+								</fileset>
+							</filesets>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-jar-plugin</artifactId>
+				<configuration>
+					<archive>
+						<manifest>
+							<addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+						</manifest>
+					</archive>
+				</configuration>
+			</plugin>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>

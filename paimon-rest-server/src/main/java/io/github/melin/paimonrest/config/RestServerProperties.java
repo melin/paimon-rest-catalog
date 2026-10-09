@@ -1,6 +1,7 @@
 package io.github.melin.paimonrest.config;
 
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -66,6 +67,14 @@ public class RestServerProperties {
     public static class Auth {
         private boolean enabled = false;
         private String principal = "anonymous";
+
+        /**
+         * 静态令牌：给机器用的长期凭据。
+         *
+         * <p>Spark / Flink 客户端把其中一个值写进配置，此后不再变更。
+         * 浏览器里不该用它——运维换人不改配置就没法区分，而写在客户端配置里的
+         * 令牌也很难轮转。浏览器走 {@link Console} 的两种交互式登录。
+         */
         private List<String> tokens = new ArrayList<>();
 
         /**
@@ -75,6 +84,284 @@ public class RestServerProperties {
          * 未配置的令牌退化为「令牌即主体名」。
          */
         private Map<String, String> tokenPrincipals = new LinkedHashMap<>();
+
+        private final AccessToken accessToken = new AccessToken();
+
+        private final Console console = new Console();
+
+        /**
+         * {@code paimon.rest.auth.access-token.*}：控制台登录签发的访问令牌。
+         *
+         * <p><b>令牌是自包含的 JWT，不是服务端会话。</b>签名密钥在配置里，
+         * 因此多实例部署下任一实例签发的令牌其它实例都认，服务端重启也不失效。
+         * 上一版把会话存在内存里，多实例部署时登录只对命中的那个实例有效，
+         * 重启即全部掉线——那是设计缺陷，不是可接受的取舍。
+         *
+         * <p><b>代价是无法即时撤销。</b>令牌一旦签发，在过期前始终有效；
+         * 轮换密钥能让所有令牌立刻失效，但那也会踢掉所有人。要即时撤销单个令牌
+         * 得引入服务端黑名单或共享存储，这里选择不做，改为把 TTL 设短。
+         * 这个取舍写在 {@code docs/console-auth.md} 里。
+         */
+        @Getter
+        @Setter
+        public static class AccessToken {
+
+            /**
+             * 令牌有效期。
+             *
+             * <p>设成「浏览器一次工作会话的长度」而不是「一天」：既然没有撤销机制，
+             * TTL 就是唯一的暴露窗口上限。过期后控制台会自动跳回登录页。
+             */
+            @NotNull
+            private Duration ttl = Duration.ofHours(1);
+
+            /**
+             * 签发者标识（JWT 的 {@code iss}）。
+             *
+             * <p>本服务端自己签发的令牌用它做自校验；同时也是给下游的提示——
+             * 引擎侧若要把令牌转发给别处，凭这个字段能判断令牌来自谁。
+             */
+            private String issuer = "paimon-rest";
+
+            /**
+             * HMAC-SHA256 签名密钥，Base64 编码，解码后至少 32 字节。
+             *
+             * <p><b>留空时启动生成随机密钥</b>，此时服务端重启会让所有令牌失效、
+             * 多实例之间互不认账。本地单机调试可以接受，生产必须显式配置——
+             * 生成方式：
+             * {@code openssl rand -base64 48}。启动日志会就此给出告警。
+             */
+            private String signingKey;
+        }
+
+        /**
+         * {@code paimon.rest.auth.console.*}：浏览器访问控制台时的登录方式。
+         *
+         * <p>这里有两层开关，别混在一起看：
+         *
+         * <ol>
+         *   <li>{@code console.required}（默认 {@code true}）：<b>控制台要不要先登录</b>。
+         *       它只影响控制台自己——前端会停在登录页，{@code /api/console/v1/**}
+         *       也要求令牌。
+         *   <li>{@link Auth#isEnabled()}（{@code auth.enabled}）：<b>整个服务端要不要令牌</b>。
+         *       它管的是 {@code /v1/**}、{@code /api/catalog/v1/**}、
+         *       {@code /api/management/v1/**}——也就是引擎与脚本用的数据面。
+         * </ol>
+         *
+         * <p><b>为什么分成两层。</b>把 {@code auth.enabled} 默认打开会让开箱即用的
+         * {@code curl /v1/config}、Spark 示例、两个验收脚本全部变成 401，
+         * 而它们恰恰是这个工程最容易上手的入口。反过来，控制台是给人看的界面，
+         * 默认要求登录既能挡住随手点开的人，也不改变任何既有调用方的行为。
+         *
+         * <p><b>必须说清楚的一点：控制台门禁不是安全边界。</b>数据面默认仍然匿名可调，
+         * 绕过浏览器直接 curl 即可读到同样的数据。它防的是「有人随手打开了这个地址」，
+         * 不是「有人想拿数据」。真正的访问控制要把 {@code auth.enabled} 设为 true，
+         * 那时控制台与数据面一起受令牌约束。这句话在登录页与
+         * {@code docs/console-auth.md} 里也各写了一遍。
+         *
+         * <p>登录方式三种并存，各自独立开关，都（且只）产出一个 access token，
+         * 之后走同一条 {@code Authorization: Bearer} 通道：
+         *
+         * <ol>
+         *   <li>{@link Password}：服务端配置里的用户名与密码（默认 {@code admin/admin}），
+         *       默认开启，排在登录页第一个——它不需要运维先去建主体，开箱即用。
+         *   <li>{@link ClientCredentials}：OAuth 2.0 客户端凭据流程，凭据是
+         *       <b>主体自己的 clientId / clientSecret</b>，令牌由本服务端签发。
+         *       对应 Polaris Console 的默认方式。
+         *   <li>{@link Oidc}：OpenID Connect 授权码 + PKCE，令牌由外部身份提供方签发，
+         *       本服务端只做验签。对应 Polaris Console 的可选方式。
+         * </ol>
+         */
+        @Getter
+        @Setter
+        public static class Console {
+
+            /**
+             * 控制台是否要求先登录。
+             *
+             * <p>默认 {@code true}：打开控制台先看到登录页。设成 {@code false} 时
+             * 控制台不需要登录即可进入——只有当 {@code auth.enabled} 也为 true
+             * （数据面一起受约束）时才有意义，否则只是把界面上的门打开。
+             */
+            private boolean required = true;
+
+            private final Password password = new Password();
+
+            private final ClientCredentials clientCredentials = new ClientCredentials();
+
+            private final Oidc oidc = new Oidc();
+
+            /** 是否提供任何一种浏览器登录方式。 */
+            public boolean anyMethodEnabled() {
+                return password.isEnabled() || clientCredentials.isEnabled() || oidc.isEnabled();
+            }
+
+            /**
+             * 当前是否真的需要登录。
+             *
+             * <p>两种情形都算：整体鉴权开着（数据面也要令牌），或控制台单独要求登录。
+             * 前者开着时即使把关禁关掉，前端照样会在每个请求上吃 401，
+             * 因此不能只看 {@code required}。
+             */
+            public boolean loginRequired(boolean authEnabled) {
+                return authEnabled || required;
+            }
+        }
+
+        /**
+         * 用户名 + 密码登录（控制台的默认方式）。
+         *
+         * <p>账号来自配置而不是数据库：它要回答的是「谁可以打开控制台」，
+         * 与授权链路里的主体是两件事——前者是开门的钥匙，后者决定进门后能做什么。
+         * 登录成功签发的令牌仍然带上主体名（默认就是用户名），
+         * 因此授权判定照常按主体名走。
+         *
+         * <p><b>默认账号 {@code admin/admin} 必须在生产前改掉。</b>这是一个
+         * 「开箱能用」的默认值，不是建议值：任何知道这个地址的人都能用它进来。
+         * 服务端在密码仍是默认值时会在启动日志里告警。
+         */
+        @Getter
+        @Setter
+        public static class Password {
+
+            private boolean enabled = true;
+
+            /**
+             * 用户名 → 密码。
+             *
+             * <p>密码在配置里是明文（与 {@code auth.tokens} 的静态令牌同理）：
+             * 服务端要在内存里比对它，保存摘要只是把明文换个地方暴露，
+             * 并不能让它更安全；真正的做法是把它交给配置中心或密钥管理系统。
+             */
+            private Map<String, String> users = new LinkedHashMap<>(Map.of("admin", "admin"));
+
+            /**
+             * 把用户名翻译成主体名时的映射；未配置的用户名即主体名。
+             *
+             * <p>与 {@code auth.token-principals} 同一个用途：让「开门的账号」
+             * 与「授权链路里的主体」可以叫不同名字，例如把 {@code admin}
+             * 映射到已有的服务管理员主体，避免为它再建一个主体。
+             */
+            private Map<String, String> principals = new LinkedHashMap<>();
+
+            private final RateLimit rateLimit = new RateLimit();
+        }
+
+        /**
+         * OAuth 2.0 客户端凭据流程。
+         *
+         * <p>控制台把用户填的 clientId / clientSecret 发到本服务端的令牌端点
+         * （{@code POST /api/catalog/v1/oauth/tokens}），换回一个 Bearer 令牌。
+         * 服务端按 {@code paimon_principal} 表校验这对凭据，与引擎调用管理 API 时
+         * 用的是同一份数据。
+         */
+        @Getter
+        @Setter
+        public static class ClientCredentials {
+
+            private boolean enabled = true;
+
+            private final RateLimit rateLimit = new RateLimit();
+        }
+
+        /**
+         * 令牌端点与 OIDC 验证共用的失败限速。
+         *
+         * <p>令牌端点必须匿名可访问（它就是用来换取令牌的），因此它是这套鉴权里
+         * 唯一能被匿名反复打的地方。没有限速时，攻击者可以用一个已知的 clientId
+         * 反复猜 clientSecret——clientSecret 是 32 字节随机值，猜不中，
+         * 但猜测请求本身会把数据库打满。这里的限速针对的是这件事。
+         *
+         * <p>计数按「客户端标识 + 来源 IP」分桶，只在<b>失败</b>时累加：
+         * 正常用户会不断刷新令牌，把成功也计入会让长时间开着的控制台被自己的
+         * 正常流量锁住。
+         */
+        @Getter
+        @Setter
+        public static class RateLimit {
+
+            private boolean enabled = true;
+
+            /** 窗口内允许的失败次数，超过后该桶在窗口剩余时间内一律拒绝。 */
+            @Min(1)
+            private int maxFailures = 10;
+
+            private Duration window = Duration.ofMinutes(1);
+        }
+
+        /**
+         * OpenID Connect 授权码 + PKCE。
+         *
+         * <p>运行时只有一处需要访问外部：从 {@code issuer-uri} 拉取发现文档与 JWKS。
+         * 两者都带缓存且惰性加载，因此外部 IdP 短暂不可用时，已经在用控制台的人
+         * 不受影响（令牌是自包含的，验签只需已缓存的公钥）。
+         */
+        @Getter
+        @Setter
+        public static class Oidc {
+
+            private boolean enabled = false;
+
+            /**
+             * 身份提供方的 issuer URL，例如
+             * {@code https://keycloak.example.com/realms/EXTERNAL}。
+             *
+             * <p>服务端据此拉取 {@code /.well-known/openid-configuration}，
+             * 拿到授权端点、令牌端点与 JWKS 地址，再转告控制台。
+             * 运维只配这一个 URL，端点变化（IdP 升级、换域名）不需要改配置。
+             */
+            private String issuerUri;
+
+            /** 在 IdP 注册的客户端标识（公开客户端，走 PKCE，没有密钥）。 */
+            private String clientId;
+
+            /**
+             * 回调地址，必须与 IdP 侧登记的一致，例如
+             * {@code http://localhost:8080/console/auth/callback}。
+             *
+             * <p>由服务端下发而不是前端自己拼：IdP 比对的是完整字符串，
+             * 端口、路径、结尾斜杠差一个字符都会被拒绝，而这个错误在浏览器里
+             * 只表现为「回到 IdP 时报 redirect_uri 不合法」。
+             */
+            private String redirectUri;
+
+            private String scope = "openid profile email";
+
+            /**
+             * 从哪个 claim 取主体名。
+             *
+             * <p>默认 {@code sub}。要让授权链路认得出人，这个 claim 的取值需要
+             * 与 {@code paimon_principal.name} 或
+             * {@code paimon.rest.authorization.service-admins} 中的名字对得上，
+             * 否则登录成功但没有任何权限——现象是「每个页面都 403」。
+             */
+            private String principalClaim = "sub";
+
+            /**
+             * 期望的 {@code aud}。
+             *
+             * <p>留空则不校验受众。多 IdP 或多客户端共用一个 issuer 时应当填上，
+             * 否则给别的应用签发的令牌也能拿来访问本服务端。
+             */
+            private String audience;
+
+            /** OIDC 发现文档的缓存时长。 */
+            @NotNull
+            private Duration metadataCacheTtl = Duration.ofMinutes(10);
+
+            /** JWKS 的缓存时长。 */
+            @NotNull
+            private Duration jwksCacheTtl = Duration.ofHours(1);
+
+            /**
+             * 允许的时钟偏移。
+             *
+             * <p>IdP 与本服务端的时间不可能完全一致，留一点余量，
+             * 避免「刚签发的令牌被判为尚未生效」。
+             */
+            @NotNull
+            private Duration clockSkew = Duration.ofSeconds(60);
+        }
     }
 
     /**

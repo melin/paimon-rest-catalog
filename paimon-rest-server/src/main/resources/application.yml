@@ -52,12 +52,106 @@ paimon:
     default-page-size: 100
     max-page-size: 1000
     auth:
-      # true 时要求 Authorization: Bearer <token>，token 需出现在 tokens 列表中
+      # true 时所有 /v1/**、/api/catalog/v1/**、/api/management/v1/**、/api/console/v1/** 都要求
+      # Authorization: Bearer <token>（例外只三条：登录引导 /api/console/v1/auth、
+      # 登录 /api/console/v1/login 与令牌端点 /api/catalog/v1/oauth/tokens）
       enabled: false
+      # 关闭鉴权时请求落到哪个主体名下
       principal: anonymous
+      # 静态令牌：给机器用——Spark / Flink 客户端把它写死在配置里，之后不再变更。
+      # 浏览器不要用它：换人不改配置就区分不了，写在客户端配置里的令牌也很难轮转。
+      # 浏览器走下面的 console 两种登录方式。
       tokens: []
       # 令牌 → 主体名映射；授权判定按主体名查授权链路，未配置的令牌退化为「令牌即主体名」
       token-principals: {}
+      # -----------------------------------------------------------------------
+      # 控制台登录签发的访问令牌。
+      #
+      # 令牌是自包含的 JWT，服务端不存任何会话。因此：
+      #   - 多实例部署下任一实例签发的令牌其余实例都认；
+      #   - 服务端重启不会让已登录的人掉线；
+      #   - 代价是无法即时撤销：令牌签发后在有效期内始终有效，TTL 是唯一的暴露窗口
+      #     上限。要踢掉某个人只能轮换 signing-key，而那会踢掉所有人。
+      # -----------------------------------------------------------------------
+      access-token:
+        # 浏览器一次工作会话的长度。没有撤销机制时这个值不宜大
+        ttl: 1h
+        # JWT 的 iss，用于自校验
+        issuer: paimon-rest
+        # HMAC-SHA256 签名密钥，Base64，解码后至少 32 字节。生成：openssl rand -base64 48
+        # 留空则进程启动时随机生成——本地单机调试可用，但重启会让所有人掉线、
+        # 多实例之间互相 401，生产必须显式配置（启动日志会就此告警）
+        signing-key: ""
+      # -----------------------------------------------------------------------
+      # 浏览器访问控制台时的登录方式，三种，可同时启用。
+      # 三者都只产出一个 access token，之后走同一条 Authorization: Bearer 通道。
+      #
+      # 两个开关别混在一起看：
+      #   auth.console.required（默认 true）——控制台要不要先登录（只挡界面与
+      #     /api/console/v1/**）。
+      #   auth.enabled（默认 false）——整个服务端要不要令牌，管的是 /v1/**、
+      #     /api/catalog/v1/**、/api/management/v1/**，也就是引擎用的数据面。
+      # 数据面默认仍匿名可调，因此控制台门禁挡的是「随手打开这个地址」，
+      # 不是「想拿数据的人」。要真正的访问控制就把 auth.enabled 设为 true。
+      # -----------------------------------------------------------------------
+      console:
+        # 控制台是否要求先登录。设 false 后打开控制台不再需要登录
+        # （只有 auth.enabled 也为 true 时才有意义，否则等于把界面上的门打开）。
+        required: true
+        # 方式一（默认）：用户名 + 密码，账号就在下面，不需要先建主体。
+        password:
+          enabled: true
+          # 用户名 → 密码。默认 admin/admin 是「开箱能用」，不是建议值：
+          # 任何能访问这个地址的人都能用它进来。密码仍是默认值时启动会告警。
+          users:
+            admin: admin
+          # 用户名 → 主体名；未配置的用户名即主体名。用于让「开门的账号」与
+          # 「授权链路里的主体」叫不同名字，例如把 admin 映射到已有的服务管理员主体
+          principals: {}
+          # 用户名密码比客户端凭据更怕爆破（密码是人定的，可能只有六七个字符），
+          # 因此阈值比下面那组更严。按「直连地址 + 用户名」分桶，只在失败时计数。
+          rate-limit:
+            enabled: true
+            max-failures: 5
+            window: 1m
+        # 方式二（默认）：OAuth 2.0 客户端凭据流程。
+        # 控制台把用户填的 clientId / clientSecret POST 到
+        # /api/catalog/v1/oauth/tokens，换回一个 Bearer 令牌。
+        # 凭据校验走 paimon_principal 表，与引擎调用管理 API 用的是同一份数据。
+        client-credentials:
+          enabled: true
+          # 令牌端点是这套鉴权里唯一能匿名反复调用的地方，失败限速防的是
+          # 「用已知 clientId 反复猜 clientSecret」时把数据库打满。
+          # 按「直连地址 + clientId」分桶，只在失败时计数。
+          # 若前置了反向代理，所有请求会被视为同一来源，此时应调大阈值或关掉限速。
+          rate-limit:
+            enabled: true
+            max-failures: 10
+            window: 1m
+        # 方式三（可选）：OpenID Connect 授权码 + PKCE，令牌由外部 IdP 签发，
+        # 本服务端只验签（RS256 / ES256，公钥从 IdP 的 JWKS 取）。
+        oidc:
+          enabled: false
+          # IdP 的 issuer URL，服务端据此拉 /.well-known/openid-configuration，
+          # 把授权端点、令牌端点与 JWKS 地址一并发现出来，并转告控制台。
+          # 例如：https://keycloak.example.com/realms/EXTERNAL
+          issuer-uri: ""
+          # 在 IdP 注册的公开客户端标识（PKCE，没有密钥——浏览器里放不下秘密）
+          client-id: ""
+          # 必须在 IdP 侧登记过的回调地址，例如
+          # http://localhost:8080/console/auth/callback
+          redirect-uri: ""
+          scope: openid profile email
+          # 从哪个 claim 取主体名。取到的值需要与 paimon_principal.name 或
+          # authorization.service-admins 里的名字对得上，否则登录成功但什么也看不到
+          principal-claim: sub
+          # 期望的 aud。留空不校验；同一 issuer 下还有别的应用时应当填上
+          audience: ""
+          metadata-cache-ttl: 10m
+          # 刷新失败时沿用旧值，因此 IdP 短暂不可用不会把已在用控制台的人踢出去
+          jwks-cache-ttl: 1h
+          # IdP 与本服务端的时钟不可能完全一致，留一点余量
+          clock-skew: 60s
     # 管理 API（/api/management/v1/**）的 RBAC 授权，默认关闭以保持既有行为
     authorization:
       enabled: false

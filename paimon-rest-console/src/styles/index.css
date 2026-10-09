@@ -1,0 +1,482 @@
+/* ---------------------------------------------------------------------------
+ * 控制台的视觉基准。
+ *
+ * 只定义自己的设计变量并覆盖少量 Element Plus 变量，不去改组件内部结构：
+ * Element Plus 的类名不是稳定的公开契约，按它写选择器后升级会静默失效。
+ * 需要局部样式时一律用 :deep()，并把范围限制在本工程的组件里。
+ *
+ * 字号与控件尺寸统一在这里定，不在各视图里各写一份。视图里散落的
+ * `.pc-tip { font-size: 11.5px }` 这类重复定义会漂移（同一类提示在几个页面里
+ * 分别是 11.5 / 12px），最后表现为「有的地方字大、有的地方字小」——
+ * 那不是一个要靠逐个页面调回来的问题，是要收敛到一处的问题。
+ * --------------------------------------------------------------------------- */
+
+:root {
+  --pc-sidebar-w: 252px;
+  --pc-sidebar-bg: #0e1626;
+  --pc-sidebar-fg: #c7d2e3;
+  --pc-sidebar-dim: #7b8aa3;
+  --pc-sidebar-hover: rgba(255, 255, 255, 0.07);
+  --pc-sidebar-active: rgba(59, 130, 246, 0.18);
+  --pc-sidebar-active-fg: #dce9ff;
+
+  --pc-page-bg: #f3f5f9;
+  --pc-surface: #ffffff;
+  --pc-surface-2: #f7f9fc;
+  --pc-border: #e2e7f0;
+  --pc-text: #1f2937;
+  --pc-text-dim: #6b7280;
+  --pc-accent: #1d4ed8;
+  --pc-radius: 10px;
+  --pc-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.05);
+
+  /* --- Element Plus 的尺寸与字号 -------------------------------------------
+   * 默认值（`small` = 24px 高 / 13px 字、`default` = 32px / 14px）在中文界面里
+   * 偏小，按钮与输入框尤其明显。这里整体抬一档，而不是去改 160 多处
+   * `size="small"`：那些属性表达的是「这个控件在同层级里次要」，
+   * 是布局意图；至于「次要控件到底多高」属于设计基准，本来就该只有一处。
+   *
+   * 抬升幅度：small 24 -> 30px（+25%），default 32 -> 34px。
+   * small 抬得比 default 多，是因为原来两者差 8px，差距大到看起来像两种控件。
+   *
+   * 注意这组变量对**按钮无效**：Element Plus 把按钮高度钉在自己的
+   * `.el-button { height: 32px }` 与 `.el-button--small { --el-button-size: 24px }`
+   * 上（见下方「按钮高度」），不走 `--el-component-size*`。
+   * ------------------------------------------------------------------------- */
+  --el-component-size-large: 42px;
+  --el-component-size: 34px;
+  --el-component-size-small: 30px;
+
+  --el-font-size-extra-large: 20px;
+  --el-font-size-large: 18px;
+  --el-font-size-medium: 16px;
+  --el-font-size-base: 14px;
+  --el-font-size-small: 14px;
+  --el-font-size-extra-small: 13px;
+
+  /* 让 Element Plus 的主色与控制台一致 */
+  --el-color-primary: #1d4ed8;
+  --el-border-radius-base: 8px;
+}
+
+html.dark {
+  --pc-sidebar-bg: #070c16;
+  --pc-sidebar-fg: #c3cfe3;
+  --pc-sidebar-dim: #6f7f99;
+  --pc-sidebar-hover: rgba(255, 255, 255, 0.05);
+  --pc-sidebar-active: rgba(96, 165, 250, 0.18);
+  --pc-sidebar-active-fg: #e2edff;
+
+  --pc-page-bg: #0b1220;
+  --pc-surface: #111a2b;
+  --pc-surface-2: #0e1626;
+  --pc-border: #1e2b40;
+  --pc-text: #e4e9f2;
+  --pc-text-dim: #90a0b8;
+  --pc-accent: #7ba7f7;
+  --pc-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+
+  --el-color-primary: #4b83f0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--pc-page-bg);
+  color: var(--pc-text);
+  font-family: system-ui, -apple-system, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 等宽字体：路径、ID、JSON、令牌都用它，避免 0/O、1/l 混淆 */
+.pc-mono {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 13px;
+}
+
+/* --- 全局基元 -----------------------------------------------------------
+ * 这几个类原先散在 8 个视图里各自定义，字号与间距互不相同。
+ * 收敛到这里的判据是：它们的语义与页面无关（提示文字、按钮内文字、
+ * 撑满宽度、链接、区块间距），因此放在一处。
+ * ---------------------------------------------------------------------- */
+
+/* 区块级的补充说明（卡片底部成段的注意事项）。
+ * 表单字段旁的备注不用它——那类备注收进 FieldLabel 的问号图标，见上。 */
+.pc-tip {
+  margin-top: 5px;
+  color: var(--pc-text-dim);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.pc-tip code {
+  padding: 1px 5px;
+  background: var(--pc-surface-2);
+  border: 1px solid var(--pc-border);
+  border-radius: 4px;
+}
+
+/* 字段备注收进问号图标后的样式（FieldLabel.vue，气泡挂在 body 下，须全局定义） */
+.pc-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pc-field-label-icon {
+  color: var(--pc-text-dim);
+  cursor: help;
+  transition: color 0.15s;
+}
+
+.pc-field-label-icon:hover {
+  color: var(--el-color-primary);
+}
+
+.pc-field-tip {
+  line-height: 1.7;
+}
+
+.pc-field-tip p {
+  margin: 0 0 6px;
+}
+
+.pc-field-tip p:last-child {
+  margin-bottom: 0;
+}
+
+.pc-field-tip code {
+  padding: 1px 5px;
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+}
+
+/* 气泡宽度：不限制时长备注会撑成一条横贯整屏的窄条 */
+.pc-field-tip-popper {
+  max-width: 440px;
+}
+
+/* --- 按钮高度 -----------------------------------------------------------
+ * Element Plus 把按钮高度钉在组件自己的变量上：`.el-button { height: 32px }`
+ * 与 `.el-button--small { --el-button-size: 24px }`，上面的
+ * `--el-component-size*` 抬升对它无效——表现为表单里按钮比输入框
+ * 矮一圈（输入框 small 30px、按钮 small 24px）。这里按同一档位补齐：
+ * default 32 -> 36px，small 24 -> 32px；small 的字号跟着从 12px 抬到 13px，
+ * 与全局 `--el-font-size-extra-small` 一致。
+ * ---------------------------------------------------------------------- */
+.el-button {
+  --el-button-size: 36px;
+  height: var(--el-button-size);
+}
+
+.el-button--small {
+  --el-button-size: 32px;
+  font-size: 13px;
+}
+
+/* --- 选择框高度 ---------------------------------------------------------
+ * 同一个问题的另一面：`el-select` 的高度也是写死的
+ * （`.el-select__wrapper { min-height: 32px }`，small 24px、large 40px），
+ * 一样不跟随 `--el-component-size*`。于是「输入框 30px、下拉框 24px」
+ * 并排出现时下沿不齐。这里按输入框那一档对齐：
+ * default 34px、small 30px、large 42px。
+ *
+ * small 的内边距同步收窄（Element Plus 给的是 2px 8px，而输入框是 1px 11px）：
+ * 只改高度不改内边距时，文字会贴着上沿。
+ * ---------------------------------------------------------------------- */
+.el-select__wrapper {
+  min-height: var(--el-component-size);
+}
+
+.el-select--small .el-select__wrapper {
+  min-height: var(--el-component-size-small);
+  padding: 1px 11px;
+}
+
+.el-select--large .el-select__wrapper {
+  min-height: var(--el-component-size-large);
+}
+
+/* 区块级提示（通常挂在 el-alert 上）与下一个区块的间距 */
+.pc-hint {
+  margin-bottom: 14px;
+}
+
+/* 按钮内的文字：与左侧图标拉开距离，且不允许折行 */
+.pc-btn-text {
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+/* 撑满容器（主要用于 el-input / el-select） */
+.pc-full {
+  width: 100%;
+}
+
+/* 表格里的可点名称 */
+.pc-link {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+.pc-link:hover {
+  text-decoration: underline;
+}
+
+/* --- 页面骨架 --------------------------------------------------------- */
+
+.pc-page {
+  padding: 24px 26px 48px;
+}
+
+.pc-page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+
+.pc-page-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.pc-page-sub {
+  margin: 6px 0 0;
+  color: var(--pc-text-dim);
+  font-size: 13px;
+  line-height: 1.7;
+  max-width: 82ch;
+}
+
+.pc-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* --- 卡片 ------------------------------------------------------------- */
+
+.pc-card {
+  background: var(--pc-surface);
+  border: 1px solid var(--pc-border);
+  border-radius: var(--pc-radius);
+  box-shadow: var(--pc-shadow);
+}
+
+.pc-card + .pc-card {
+  margin-top: 16px;
+}
+
+.pc-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--pc-border);
+}
+
+.pc-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14.5px;
+  font-weight: 600;
+}
+
+.pc-card-hint {
+  color: var(--pc-text-dim);
+  font-size: 12.5px;
+  font-weight: 400;
+  margin-left: 8px;
+}
+
+.pc-card-body {
+  padding: 18px 20px;
+}
+
+.pc-card-body.is-flush {
+  padding: 0;
+}
+
+/* --- 统计块 ----------------------------------------------------------- */
+
+.pc-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 16px;
+}
+
+.pc-stat {
+  padding: 18px 20px;
+  background: var(--pc-surface);
+  border: 1px solid var(--pc-border);
+  border-radius: var(--pc-radius);
+  box-shadow: var(--pc-shadow);
+}
+
+.pc-stat-label {
+  color: var(--pc-text-dim);
+  font-size: 13px;
+}
+
+.pc-stat-value {
+  margin-top: 8px;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+.pc-stat-foot {
+  margin-top: 8px;
+  color: var(--pc-text-dim);
+  font-size: 12px;
+}
+
+/* --- 通用小件 --------------------------------------------------------- */
+
+.pc-dim {
+  color: var(--pc-text-dim);
+}
+
+.pc-nowrap {
+  white-space: nowrap;
+}
+
+.pc-break {
+  word-break: break-all;
+}
+
+.pc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pc-row-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pc-spacer {
+  flex: 1;
+}
+
+.pc-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 键值对列表：描述块之外的紧凑展示 */
+.pc-kv {
+  display: grid;
+  grid-template-columns: minmax(130px, max-content) 1fr;
+  gap: 8px 18px;
+  font-size: 13.5px;
+}
+
+.pc-kv dt {
+  color: var(--pc-text-dim);
+}
+
+.pc-kv dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.pc-json {
+  margin: 0;
+  padding: 14px 16px;
+  max-height: 420px;
+  overflow: auto;
+  background: var(--pc-surface-2);
+  border: 1px solid var(--pc-border);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* 滚动条：默认宽度在深色底上很扎眼 */
+.pc-json::-webkit-scrollbar,
+.pc-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.pc-json::-webkit-scrollbar-thumb,
+.pc-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--pc-text-dim) 35%, transparent);
+  border-radius: 6px;
+}
+
+/* --- Element Plus 的微调：表格与卡片风格统一 -----------------------------
+ * 表格字号单独调：它比正文更密（一行里要放得下名称、路径、时间、操作），
+ * 跟着 `--el-font-size-base` 走会让列宽迅速不够用。13.5px 是在
+ * 「中文可读」与「列放得下」之间的取值。
+ * -------------------------------------------------------------------- */
+
+.el-table {
+  --el-table-border-color: var(--pc-border);
+  --el-table-header-bg-color: var(--pc-surface-2);
+  --el-table-header-text-color: var(--pc-text-dim);
+  font-size: 13.5px;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+}
+
+/* 行高跟着字号一起抬，否则 13.5px 的字挤在原来的行里更显局促 */
+.el-table .el-table__cell {
+  padding: 10px 0;
+}
+
+.el-drawer__header {
+  margin-bottom: 0;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--pc-border);
+  color: var(--pc-text);
+  font-size: 15.5px;
+}
+
+.el-drawer__body {
+  padding-top: 18px;
+}
+
+.el-descriptions__label {
+  color: var(--pc-text-dim);
+}
+
+/* 对话框标题也跟着抬一档，否则与放大的正文不成比例 */
+.el-dialog__title {
+  font-size: 16.5px;
+  font-weight: 600;
+}
+
+.el-dialog__body {
+  padding-top: 18px;
+}

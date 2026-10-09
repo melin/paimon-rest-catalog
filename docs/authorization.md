@@ -15,20 +15,40 @@ Paimon REST Catalog API（`/v1/**`）上。
 
 | 层 | 回答的问题 | 实现 | 配置前缀 |
 | --- | --- | --- | --- |
-| 认证 | 调用者是谁 | `BearerAuthInterceptor` 解析 `Authorization: Bearer <token>`，把令牌映射成主体名，写入 `RequestContext` | `paimon.rest.auth.*` |
+| 认证 | 调用者是谁 | `BearerAuthInterceptor` 取 `Authorization: Bearer <token>`，交给 `TokenAuthenticationService` 认证成主体名，写入 `RequestContext` | `paimon.rest.auth.*` |
 | 授权 | 这个主体能做什么 | 管理 API 在控制器内判定；catalog API 在 `AuthorizationInterceptor` 统一判定 | `paimon.rest.authorization.*` |
 
-认证的两条通路：
+认证是**一条链**，令牌来自三个来源之一（顺序即尝试顺序）：
 
-- `paimon.rest.auth.tokens` 列出允许的令牌；
-- `paimon.rest.auth.token-principals` 给出「令牌 → 主体名」映射；**未登记的令牌退化为「令牌本身即主体名」**。
+1. **静态令牌**（`paimon.rest.auth.tokens`）——服务端配置的长期凭据，给机器用。
+   `paimon.rest.auth.token-principals` 给出「令牌 → 主体名」映射；
+   **未登记的令牌退化为「令牌本身即主体名」**。
+2. **控制台访问令牌**——本服务端签发（HS256）的 JWT，有两条路换来：
+   主体用 `clientId` / `clientSecret` 走 OAuth 2.0 客户端凭据，
+   或者用 `paimon.rest.auth.console.password.users` 里配置的**控制台账号 + 密码**。
+   **两条路签发的令牌完全一样**，对授权链路没有区别。
+3. **OIDC 令牌**——外部身份提供方签发的 JWT（RS256 / ES256），本服务端拉 JWKS 验签。
 
-`paimon.rest.auth.enabled=false`（默认）时，所有请求以 `paimon.rest.auth.principal`
-（默认 `anonymous`）通过，便于本地开发与既有部署平滑升级。
+三种来源在 `TokenAuthenticationService` 合流，**下游只看主体名**：
+授权判定与审计字段都不需要知道令牌是配置里的字符串、控制台签的 JWT，还是 IdP 签的 JWT。
+加一种认证方式只改那一个类。完整设计见 [`console-auth.md`](console-auth.md)。
 
-> **边界**：「令牌 → 主体」映射来自静态配置。因此通过管理 API 新建的主体**不能立即**
-> 用它的 `clientId` / `clientSecret` 调用管理 API——需要先把令牌登记进配置并重启，
-> 或改由外部身份提供方签发。这是当前实现的有意留白，见文末「已知边界」。
+> **控制台账号与主体的边界。** 配置里的控制台账号**不是主体**：它是「开门的钥匙」，
+> 账号名默认直接当主体名用（可用 `console.password.principals` 映射成别的主体名）。
+> 因此用 `admin/admin` 登录成功之后**什么也看不到是正常的**——除非 `admin`
+> 被列进 `service-admins` 或被授予了某个 principal role。
+> 服务端会为这种「账号在授权链路里查不到」的情况在启动日志里告警。
+> 另外控制台门禁（`console.required`）只挡住浏览器界面，
+> **不改变本文件描述的授权判定**，也不是安全边界（见
+> [`console-auth.md` §2.1](console-auth.md#21-两个开关门禁不是安全边界)）。
+
+`paimon.rest.auth.enabled=false`（默认）时，数据面（`/v1/**`、`/api/catalog/v1/**`、
+`/api/management/v1/**`）的请求都以 `paimon.rest.auth.principal`（默认 `anonymous`）通过，
+便于本地开发与既有部署平滑升级。
+
+**一个例外**：控制台自己另有一层门禁 `console.required`（默认 `true`），
+它让 `/api/console/v1/**` 在 `auth.enabled=false` 时**也**要求令牌。
+这一层不参与授权判定——它只是把浏览器拦在登录页，`/api/management/v1/**` 依旧匿名可调。
 
 ---
 
@@ -170,8 +190,17 @@ catalog 存在但主体无权时仍返回 403。
 | --- | --- | --- |
 | `paimon.rest.auth.enabled` | `false` | 是否要求 `Authorization: Bearer <token>` |
 | `paimon.rest.auth.principal` | `anonymous` | 认证关闭或未带令牌时使用的主体名 |
-| `paimon.rest.auth.tokens` | 空 | 允许的令牌列表 |
-| `paimon.rest.auth.token-principals` | 空 | 令牌 → 主体名映射；未登记的令牌退化为「令牌即主体名」 |
+| `paimon.rest.auth.tokens` | 空 | 允许的静态令牌列表 |
+| `paimon.rest.auth.token-principals` | 空 | 静态令牌 → 主体名映射；未登记的令牌退化为「令牌即主体名」 |
+| `paimon.rest.auth.access-token.ttl` | `1h` | 控制台签发的访问令牌有效期 |
+| `paimon.rest.auth.access-token.issuer` | `paimon-rest` | 访问令牌的 `iss` |
+| `paimon.rest.auth.access-token.signing-key` | 空 | HS256 签名密钥（Base64，≥32 字节）；留空则每次启动随机生成 |
+| `paimon.rest.auth.console.required` | `true` | 浏览器进控制台是否必须先登录；**只作用于界面，不是安全边界** |
+| `paimon.rest.auth.console.password.enabled` | `true` | 是否允许用配置里的账号密码换令牌 |
+| `paimon.rest.auth.console.password.users` | `admin: admin` | 控制台账号表（明文）；**生产必须改** |
+| `paimon.rest.auth.console.password.principals` | 空 | 账号名 → 主体名映射；不填则两者同名 |
+| `paimon.rest.auth.console.client-credentials.enabled` | `true` | 是否允许用主体凭据换令牌 |
+| `paimon.rest.auth.console.oidc.*` | 关闭 | 外部身份提供方登录；见 [`console-auth.md`](console-auth.md) |
 | `paimon.rest.authorization.enabled` | `false` | 是否对管理 API 与 catalog API 启用 RBAC 判定 |
 | `paimon.rest.authorization.service-admins` | `[root]` | 服务管理员主体名单 |
 | `paimon.rest.authorization.bootstrap-principal` | `root` | 启动时预置的引导主体；留空则不预置 |
@@ -221,8 +250,14 @@ curl -s -X PUT -H "$AUTH" -H "$J" \
 # 5) 核对
 curl -s -H "$AUTH" "$M/catalogs/paimon/catalog-roles/reader/grants"
 
-# 6) 用该主体的令牌访问 catalog API
-#    注意：令牌必须在 paimon.rest.auth.token-principals 里登记过（键为令牌，值为主体名）
+# 6) 用该主体的凭据访问 catalog API。两条路都行：
+#    a) 刚建主体时拿到的一次性 clientId / clientSecret → 换一个访问令牌（推荐）
+TOKEN=$(curl -s -X POST http://127.0.0.1:8080/api/catalog/v1/oauth/tokens \
+  -d grant_type=client_credentials \
+  -d client_id="$CLIENT_ID" -d client_secret="$CLIENT_SECRET" | jq -r .access_token)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "$J" \
+  -d '{"name":"sales","options":{}}' "http://127.0.0.1:8080/v1/paimon/databases"
+#    b) 或者把长期令牌登记进 paimon.rest.auth.tokens / token-principals 再用（给机器用）
 curl -s -X POST -H "Authorization: Bearer etl-token" -H "$J" \
   -d '{"name":"sales","options":{}}' "http://127.0.0.1:8080/v1/paimon/databases"
 # -> 403：reader 只有 NAMESPACE_LIST，没有 NAMESPACE_CREATE
@@ -236,16 +271,21 @@ curl -s -X POST -H "Authorization: Bearer etl-token" -H "$J" \
 
 按优先级排列，均为当前实现有意留出的边界：
 
-1. **令牌 → 主体映射是静态配置。** 新建主体无法立即取到可用的调用令牌，需要登记配置并重启，
-   或接入外部身份提供方。这是与真实部署差距最大的一处。
-2. **`CATALOG_MANAGE_METADATA` 的蕴含未展开。** Polaris 文档只说它「enables full management of
+1. **静态令牌的映射是静态配置。** `token-principals` 决定「静态令牌 → 主体名」，
+   改映射要重启。但**新建主体不受此限**：创建时会一次性返回 `clientId` 与明文
+   `clientSecret`，用它们走 `POST /api/catalog/v1/oauth/tokens` 换一个访问令牌即可立即
+   调用管理 API（见 [`console-auth.md`](console-auth.md)）。静态令牌这条路才是给
+   「凭据写死在引擎配置里、之后不再变更」的机器用的。
+2. **访问令牌无法即时撤销。** 服务端不保存会话，令牌在 `access-token.ttl` 内一直有效；
+   要立刻失效只能轮换 `access-token.signing-key`（会作废所有人的令牌）。
+3. **`CATALOG_MANAGE_METADATA` 的蕴含未展开。** Polaris 文档只说它「enables full management of
    the catalog, catalog roles, namespaces, and tables」，未像 `CATALOG_MANAGE_CONTENT` 那样逐项
    列举，因此只把它作为被蕴含项，不再向下展开。
-3. **`CATALOG_FULL_METADATA` 未实现。** 文档提到该权限，但规格的权限 enum 中没有这个取值。
+4. **`CATALOG_FULL_METADATA` 未实现。** 文档提到该权限，但规格的权限 enum 中没有这个取值。
    规格补上后在此处加规则即可。
-4. **行过滤与列脱敏策略未实现。** `auth` 端点返回空的过滤表达式与脱敏映射，只做列存在性校验。
-5. **授权不校验被授权对象是否存在。** 可以对尚未创建的表授予 `TABLE_READ_DATA`，授权记录先于
+5. **行过滤与列脱敏策略未实现。** `auth` 端点返回空的过滤表达式与脱敏映射，只做列存在性校验。
+6. **授权不校验被授权对象是否存在。** 可以对尚未创建的表授予 `TABLE_READ_DATA`，授权记录先于
    对象存在是允许的（这也是先建授权再把表接管的正常顺序）。
-6. **无权限缓存。** 每次请求按主体查授权链路，权限变更即时生效，代价是热点路径上的若干次查询。
-7. **语义模型授权的延迟语义未实现。** 文档标注为 deferred 的源表 / 视图权限校验与读时传播
+7. **无权限缓存。** 每次请求按主体查授权链路，权限变更即时生效，代价是热点路径上的若干次查询。
+8. **语义模型授权的延迟语义未实现。** 文档标注为 deferred 的源表 / 视图权限校验与读时传播
    检查不在本层表达。

@@ -1,0 +1,23 @@
+{
+  "name": "paimon-rest-console",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Paimon REST Catalog 的 Web 管理控制台",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check:login": "vite build --config tools/console-login-check/vite.config.mjs && node tools/console-login-check/dist/main.js"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "element-plus": "^2.14.7",
+    "vue": "^3.5.43",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.9",
+    "vite": "^8.3.3"
+  }
+}

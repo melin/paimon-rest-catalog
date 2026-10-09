@@ -22,6 +22,13 @@ target/
 build/
 **/build/
 
+# 控制台前端的依赖目录。源码留在这里是有意的：镜像里不需要它（控制台的
+# 构建产物已经提交在 paimon-rest-server/src/main/resources/static/console，
+# 且 Dockerfile 只编译 Java），但保留源码让上下文与仓库状态一致、便于排查；
+# node_modules 则是纯粹的体积——几十万个文件进不了镜像构建上下文。
+paimon-rest-console/node_modules/
+paimon-rest-console/.vite/
+
 # 与本镜像无关的目录：文档、验收脚本、OpenAPI 规格、部署清单、示例
 docs/
 scripts/

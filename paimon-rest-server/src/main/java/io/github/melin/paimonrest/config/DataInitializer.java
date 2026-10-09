@@ -26,6 +26,7 @@ import io.github.melin.paimonrest.support.StorageConfigs;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.ApplicationArguments;
@@ -46,6 +47,9 @@ public class DataInitializer implements ApplicationRunner {
 
     private static final String SYSTEM_PRINCIPAL = "system";
 
+    /** 内置的默认账号密码。用户表里出现这个值时启动告警，见 {@link #warnAboutDefaultPassword}。 */
+    private static final String DEFAULT_PASSWORD = "admin";
+
     private final RestServerProperties properties;
     private final CatalogRepository catalogRepository;
     private final DatabaseRepository databaseRepository;
@@ -59,8 +63,12 @@ public class DataInitializer implements ApplicationRunner {
     @Override
     @Transactional
     public void run(ApplicationArguments args) {
+        warnAboutAuthConfiguration();
+
         String prefix = properties.getInitialCatalog().getPrefix();
         if (prefix == null || prefix.isBlank()) {
+            // 没有初始 catalog 可播种。账号与授权链路的对账仍要做——它与初始 catalog 无关
+            warnAboutPasswordAccountsWithoutPrincipal();
             return;
         }
         String warehouse = properties.getInitialCatalog().getWarehouse();
@@ -101,6 +109,162 @@ public class DataInitializer implements ApplicationRunner {
         }
 
         bootstrapAuthorization(catalog, now);
+        warnAboutPasswordAccountsWithoutPrincipal();
+    }
+
+    /**
+     * 报告认证配置的组合问题。
+     *
+     * <p>这些组合的共同点是「不会报错，只是不生效」——服务端照常启动、请求照常返回，
+     * 问题只在人对着登录页发愣或者权限不对时才浮现。所以必须在启动日志里说出来。
+     */
+    private void warnAboutAuthConfiguration() {
+        RestServerProperties.Auth auth = properties.getAuth();
+        RestServerProperties.Auth.Console console = auth.getConsole();
+        RestServerProperties.Auth.Oidc oidc = console.getOidc();
+
+        if (!console.loginRequired(auth.isEnabled())) {
+            if (console.anyMethodEnabled()) {
+                log.warn("console login methods are configured but neither"
+                        + " paimon.rest.auth.enabled nor paimon.rest.auth.console.required is on:"
+                        + " the console will not ask anyone to log in, and the server accepts every"
+                        + " request without a token.");
+            }
+            return;
+        }
+
+        List<String> methods = configuredMethods(console, oidc);
+        if (methods.isEmpty()) {
+            log.warn("the console requires a login but all login methods are disabled"
+                    + " (paimon.rest.auth.console.password.enabled,"
+                    + " …client-credentials.enabled and …oidc.enabled): the web console can only be"
+                    + " used by pasting a token listed in paimon.rest.auth.tokens");
+        } else {
+            // 配置齐了就报告一行：运维需要从启动日志确认「登录是按我配的那样生效的」，
+            // 而不是去试一次登录才知道
+            log.info("console login methods: {}", String.join(", ", methods));
+        }
+
+        if (!auth.isEnabled()) {
+            // 这是默认组合（console.required=true、auth.enabled=false）。必须说清楚它挡住了
+            // 什么、没挡住什么——否则会被当成真正的访问控制
+            log.warn("the console requires a login while paimon.rest.auth.enabled is false: the console"
+                    + " asks for credentials before showing anything, but /v1/**,"
+                    + " /api/catalog/v1/** and /api/management/v1/** still answer anonymous requests."
+                    + " Set paimon.rest.auth.enabled=true to make it an access boundary.");
+        }
+
+        warnAboutDefaultPassword(console.getPassword());
+
+        if (oidc.isEnabled()) {
+            warnAboutOidc(oidc);
+        }
+    }
+
+    /** 已开启的登录方式（只看开关，不看 OIDC 的发现文档能不能拉到）。 */
+    private static List<String> configuredMethods(
+            RestServerProperties.Auth.Console console, RestServerProperties.Auth.Oidc oidc) {
+        List<String> methods = new ArrayList<>();
+        if (console.getPassword().isEnabled()) {
+            methods.add("password");
+        }
+        if (console.getClientCredentials().isEnabled()) {
+            methods.add("client-credentials");
+        }
+        if (oidc.isEnabled()) {
+            methods.add("oidc");
+        }
+        return methods;
+    }
+
+    /**
+     * 内置默认密码的告警。
+     *
+     * <p>默认账号 {@code admin/admin} 是「开箱能用」，不是「建议使用」：任何能访问这个
+     * 地址的人都能用它进来。这一条只在密码仍等于内置值（{@code admin}）时出现，
+     * 改掉之后就不再打扰——否则每次启动都刷一条没人看的告警，
+     * 真正需要注意的那条也会被一起忽略掉。
+     */
+    private void warnAboutDefaultPassword(RestServerProperties.Auth.Password password) {
+        if (!password.isEnabled()) {
+            return;
+        }
+        if (password.getUsers().isEmpty()) {
+            log.warn("paimon.rest.auth.console.password.enabled is true but no users are configured:"
+                    + " nobody can log in this way");
+            return;
+        }
+        List<String> weak = password.getUsers().entrySet().stream()
+                .filter(entry -> DEFAULT_PASSWORD.equals(entry.getValue()))
+                .map(Map.Entry::getKey)
+                .toList();
+        if (!weak.isEmpty()) {
+            log.warn("console password login uses its built-in default password for {}: anyone who can"
+                    + " reach this address can log in as them. Change"
+                    + " paimon.rest.auth.console.password.users, or point the account at another"
+                    + " principal with …password.principals.", String.join(", ", weak));
+        }
+    }
+
+    /**
+     * 密码账号在授权链路里认不出人时的告警。
+     *
+     * <p>登录成功却什么也看不到，是开启授权后最容易踩的坑：账号名（默认 {@code admin}）
+     * 与服务管理员名单、主体表都对不上时，请求会被判成「无权访问」。这里说的是排查方向，
+     * 不是校验——账号名与主体名本来就允许不同（用 {@code password.principals} 映射）。
+     */
+    private void warnAboutPasswordAccountsWithoutPrincipal() {
+        RestServerProperties.Auth.Console console = properties.getAuth().getConsole();
+        if (!console.getPassword().isEnabled() || !properties.getAuthorization().isEnabled()) {
+            return;
+        }
+        List<String> unresolved = new ArrayList<>();
+        for (String username : console.getPassword().getUsers().keySet()) {
+            String mapped = console.getPassword().getPrincipals().get(username);
+            String principal = mapped == null || mapped.isBlank() ? username : mapped;
+            if (properties.getAuthorization().getServiceAdmins().contains(principal)) {
+                continue;
+            }
+            if (principalRepository.findByName(principal).isEmpty()) {
+                unresolved.add(username + " -> " + principal);
+            }
+        }
+        if (!unresolved.isEmpty()) {
+            log.warn("authorization is enabled but these console password accounts map to a principal"
+                    + " that does not exist: {}. They can log in and then see nothing. Add the"
+                    + " principal name to paimon.rest.authorization.service-admins, create the"
+                    + " principal, or remap the account with …console.password.principals",
+                    String.join(", ", unresolved));
+        }
+    }
+
+    /** OIDC 的配置缺项与权限提示。 */
+    private void warnAboutOidc(RestServerProperties.Auth.Oidc oidc) {
+        if (!hasText(oidc.getIssuerUri()) || !hasText(oidc.getClientId())) {
+            log.warn("paimon.rest.auth.console.oidc.enabled is true but issuer-uri / client-id is"
+                    + " missing: OIDC login will not be offered on the console login page");
+        }
+        if (!hasText(oidc.getRedirectUri())) {
+            // IdP 比对的是完整字符串，缺了它前端只能自己猜一个，
+            // 而猜错的唯一表现是「回到 IdP 时报 redirect_uri 不合法」
+            log.warn("paimon.rest.auth.console.oidc.redirect-uri is not set: the console cannot start"
+                    + " the OIDC flow without it (it must match the redirect URI registered at the"
+                    + " identity provider)");
+        }
+        if (!hasText(oidc.getAudience())) {
+            log.warn("paimon.rest.auth.console.oidc.audience is not set: tokens issued for other"
+                    + " applications by the same issuer will also be accepted");
+        }
+        // 登录成功但没有任何权限，是 OIDC 接入最常见的「配好了却不能用」。
+        // 这里说的是排查方向，不是校验——主体名由 IdP 决定，服务端无从预知
+        log.info("OIDC logins authenticate as the value of the {} claim; that name must exist in"
+                + " paimon.rest.authorization.service-admins or be registered as a principal,"
+                + " otherwise the console will log in and then see nothing",
+                oidc.getPrincipalClaim());
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 
     /**

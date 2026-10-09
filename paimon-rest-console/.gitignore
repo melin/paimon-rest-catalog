@@ -1,0 +1,7 @@
+# 依赖与构建产物。控制台的构建产物不落在这里——它直接写进
+# paimon-rest-server/src/main/resources/static/console（见 vite.config.js 的说明）。
+node_modules/
+dist/
+.vite/
+*.local
+npm-debug.log*
