@@ -35,3 +35,4 @@ build/
 ### macOS ###
 .DS_Store
 
+paimon-rest-server/src/main/resources/static/console
