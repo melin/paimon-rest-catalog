@@ -57,8 +57,13 @@
 （见 [§7](#7-登录引导服务端说了算)）。三条路径最终产出的都是「一个 Bearer 令牌」，
 此后走同一条通道——控制台的其余代码不知道、也不需要知道令牌是怎么来的。
 
-第四个降级入口是 `paimon.rest.auth.tokens` 里的**静态令牌**（一直存在，给机器用）。
-它永远排在登录页最后一页签，不鼓励人用。
+第四个降级入口是 `paimon.rest.auth.tokens` 里的**静态令牌**（给机器用）。
+它没有独立的 `enabled` 开关——**配置里登记了令牌，登录页才会出现这一页签**；
+没配就不显示，因为它本来也不是给人用的正常路径。出现时它排在最后一位。
+
+> 四种方式都遵循同一条规则：**没开启就不出现在登录页上**（见
+> [§7](#7-登录引导服务端说了算)）。列一个用不了的方式比不列更糟——使用者会照着填，
+> 然后收到一条与服务端配置无关的错误。
 
 ### 2.1 两个开关：门禁不是安全边界
 
@@ -394,7 +399,7 @@ IdP 的令牌响应里可能同时有 `id_token` 与 `access_token`。控制台*
 {
   "authEnabled": false,
   "consoleRequired": true,
-  "methods": ["password", "client-credentials", "static-token"],
+  "methods": ["password", "client-credentials"],
   "tokenEndpoint": "/api/catalog/v1/oauth/tokens",
   "oidc": {
     "issuer": "https://keycloak.example.com/realms/EXTERNAL",
@@ -415,13 +420,20 @@ IdP 的令牌响应里可能同时有 `id_token` 与 `access_token`。控制台*
 ```
 
 （上面这一份是**默认部署**的样子：`authEnabled=false` 而 `consoleRequired=true`，
-也就是 [§2.1](#21-两个开关门禁不是安全边界) 描述的那种组合。`oidc` 只在
+也就是 [§2.1](#21-两个开关门禁不是安全边界) 描述的那种组合。默认只开两种方式，
+且没有登记静态令牌，所以 `methods` 里只有两项；`oidc` 只在
 `consoleRequired` 为真时才会去发现文档——控制台不需要登录时，发现它没有意义。）
 
-四个设计点：
+六个设计点：
 
 - **`methods` 的顺序就是页签的顺序。** 用户名密码在最前（不需要先建主体），
   静态令牌永远最后。前端不再自己决定「该推荐哪种」。
+- **没开启的方式不会出现。** 四种方式各有判据：用户名密码看 `console.password.enabled`，
+  客户端凭据看 `console.client-credentials.enabled`，OIDC 看发现文档能不能拉到，
+  静态令牌看 `auth.tokens` 里有没有登记值。因此登录页不会出现「填了也进不去」的页签。
+- **`methods` 可能为空列表。** 那时 `consoleRequired` 仍然可以是 `true`——
+  服务端要求登录，却一个方式都没开。这是配置错误，控制台会照实说，
+  并列出该开哪个配置项，而不是给一个点进去全是 401 的「进入控制台」按钮。
 - **`authEnabled` 与 `consoleRequired` 分开返回，而且必须同时如实。**
   前者说明数据面是否受保护，后者说明浏览器要不要先登录。控制台据此决定
   要不要在登录页写那句「这层门禁只挡住界面」——少了任何一个字段，
@@ -575,7 +587,7 @@ paimon:
 | `src/api/console-auth.js` | 登录引导、用户名密码换令牌、客户端凭据换令牌三条调用 |
 | `src/api/oidc.js` | PKCE：生成 verifier/challenge/state、拼授权 URL、用授权码换令牌 |
 | `src/store/auth.js` | 登录态（`authEnabled` / `consoleRequired` / 认证方式 / 主体 / 来源 / 过期）；四条登录路径都收敛到 `adopt()`；`loginRequired()` 与 `gateOnly()` 是界面判据的唯一出处 |
-| `src/views/LoginView.vue` | 登录页：按服务端下发的 `methods` 渲染页签；门禁单开时显示「只挡住界面」提示 |
+| `src/views/LoginView.vue` | 登录页：按服务端下发的 `methods` 渲染页签，**没开启的方式不渲染**；一个可用方式都没有时说明该开哪个配置项（`no-method`），而不是放行；门禁单开时显示「只挡住界面」提示 |
 | `src/views/AuthCallbackView.vue` | SSO 回调：校验 `state` → 换令牌 → 让服务端确认 → 回跳 |
 | `src/views/SettingsView.vue` | 「连接设置」：分别显示数据面鉴权与控制台门禁，并写明后者不是安全边界 |
 | `src/router/index.js` | `/login`、`/auth/callback` 为 `public`；守卫按 `auth.loginRequired() && authenticated` 拦截 |

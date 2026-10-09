@@ -78,6 +78,20 @@ public class RestServerProperties {
         private List<String> tokens = new ArrayList<>();
 
         /**
+         * 是否登记了至少一个可用的静态令牌。
+         *
+         * <p>按「有非空项」而不是「列表非空」判断：清空配置时很常见地留下一个空串，
+         * 它不该被当成「已开启」；空白令牌本身也过不了令牌匹配。
+         *
+         * <p>这是静态令牌有没有「开启」的唯一判据——它没有独立的 {@code enabled} 开关，
+         * 「开启」的表现就是配置里有值。登录页要不要显示降级入口、启动日志要不要报告它，
+         * 都以这里为准；两处各写一遍判断，迟早漂移成「日志里有、页面上没有」。
+         */
+        public boolean hasStaticTokens() {
+            return tokens.stream().anyMatch(token -> token != null && !token.isBlank());
+        }
+
+        /**
          * 令牌 → 主体名的显式映射。
          *
          * <p>授权判定按主体名查授权链路，因此开启授权时应当配置该映射；

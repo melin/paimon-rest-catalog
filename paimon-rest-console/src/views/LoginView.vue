@@ -55,6 +55,45 @@
         </el-button>
       </template>
 
+      <!-- 要求登录，却一个方式都没开。这不是「不需要登录」，也不是「登录页坏了」，
+           而是服务端配置漏了一项——所以不给进入按钮，只给出该改哪里 -->
+      <template v-else-if="mode === 'no-method'">
+        <el-alert type="error" :closable="false" show-icon class="pc-login-alert">
+          <template #title>服务端要求登录，但没有开启任何登录方式</template>
+          <div class="pc-login-alert-body">
+            服务端要求控制台登录，但登录方式一个都没开，本页面无法完成登录。
+            请让运维在服务端配置里开启下面任意一项后重新检测：
+            <ul class="pc-login-list">
+              <li>
+                <code class="pc-mono">paimon.rest.auth.console.password.enabled=true</code>
+                并配置账号（<code class="pc-mono">console.password.users</code>）
+              </li>
+              <li>
+                <code class="pc-mono">paimon.rest.auth.console.client-credentials.enabled=true</code>
+              </li>
+              <li>
+                <code class="pc-mono">paimon.rest.auth.console.oidc.enabled=true</code>
+                并配置 <code class="pc-mono">issuer-uri</code>
+              </li>
+              <li>
+                或在 <code class="pc-mono">paimon.rest.auth.tokens</code> 里登记一个静态令牌
+              </li>
+            </ul>
+            <!-- 把服务端原样下发的东西摆出来：若这里非空而上面仍说「没开启任何方式」，
+                 那说明下发的方式本页不认识，多半是控制台产物比服务端旧 -->
+            <p class="pc-login-raw">
+              服务端下发的方式：<code class="pc-mono">{{ methodsRaw }}</code>
+            </p>
+          </div>
+        </el-alert>
+        <el-button class="pc-login-submit" size="large" :loading="auth.state.checking" @click="retry">
+          重新检测
+        </el-button>
+        <p class="pc-login-foot">
+          也可以先到「<RouterLink :to="{ name: 'settings' }">连接设置</RouterLink>」改 API 基址。
+        </p>
+      </template>
+
       <template v-else>
         <!-- 这三种方式以上都是「服务端要求令牌」，只有一种例外：门禁开着而整体鉴权关着。
              那句话必须出现在登录页上——少了它，「要求登录」会被读成
@@ -275,14 +314,27 @@ const tabs = computed(() => auth.state.methods
   .filter((method) => TAB_LABELS[method])
   .map((method) => ({ name: method, label: TAB_LABELS[method] })))
 
+/**
+ * 服务端原样下发的登录方式，只在「一个都没开」的提示里显示。
+ *
+ * <p>用来区分两种外观相同的情况：服务端真的没开任何方式（这里是空），
+ * 与服务端开了但前端不认识（这里非空）——后者的修法是重建控制台，不是改服务端配置。
+ */
+const methodsRaw = computed(() => auth.state.methods.join(', ') || '（空）')
+
 const mode = computed(() => {
   if (!auth.state.checked) {
     return auth.state.error ? 'unreachable' : 'checking'
   }
-  // 服务端既不看令牌也不要求控制台登录，就没有登录可言。
-  // methods 为空也走这里——列一个点不动的登录方式比直接说「不需要登录」更难排查
-  if (!auth.loginRequired() || tabs.value.length === 0) {
+  // 服务端既不看令牌也不要求控制台登录，就没有登录可言
+  if (!auth.loginRequired()) {
     return 'not-required'
+  }
+  // 要求登录，却一个可用方式都没有：这是服务端配置错误，不能沿用 not-required——
+  // 那会给一个「进入控制台」的按钮，点进去每个请求都是 401，
+  // 反而把「某个配置项没开」这件事藏起来了
+  if (tabs.value.length === 0) {
+    return 'no-method'
   }
   return 'form'
 })
@@ -500,6 +552,21 @@ onMounted(async () => {
 }
 
 .pc-login-alert-body {
+  word-break: break-word;
+}
+
+.pc-login-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  line-height: 1.9;
+}
+
+.pc-login-list li {
+  word-break: break-word;
+}
+
+.pc-login-raw {
+  margin: 10px 0 0;
   word-break: break-word;
 }
 

@@ -111,6 +111,16 @@ public class ConsoleAuthController {
      * <p>控制台不需要登录时返回空列表：此时服务端根本不看令牌，列出登录方式只会让人以为
      * 「这个地址是有访问控制的」。前端据此直接放行并显示一条说明。
      *
+     * <p><b>每一种方式都必须真的可用才列进来。</b>四种方式各有自己的判据：用户名密码看
+     * {@code console.password.enabled}，客户端凭据看 {@code console.client-credentials.enabled}，
+     * OIDC 看发现文档是否拿得到，静态令牌看 {@code auth.tokens} 里是否登记了令牌。
+     * 列一个用不了的方式比不列更糟——使用者会照着填，然后收到一条与服务端配置无关的错误，
+     * 排查方向从一开始就是错的。这与 OIDC 的处理是同一条理由。
+     *
+     * <p>因此本方法可能返回空列表，而 {@code consoleRequired=true} 仍然成立：
+     * 服务端要求登录，却一个方式都没开。这是配置错误，不是「不需要登录」，
+     * 前端会据此显示一条运维提示而不是放行。
+     *
      * <p>顺序即展示顺序：用户名密码在最前（开箱即用，不需要先建主体），
      * 客户端凭据与 OIDC 居中，静态令牌永远最后——它是降级入口，不是推荐路径。
      */
@@ -128,7 +138,12 @@ public class ConsoleAuthController {
         if (oidcAvailable) {
             methods.add(ConsoleDtos.AuthMethod.OIDC);
         }
-        methods.add(ConsoleDtos.AuthMethod.STATIC_TOKEN);
+        // 静态令牌不配就没有这一项：它与其他三种不同，没有 enabled 开关，
+        // 「开启」的唯一表现就是 auth.tokens 里有值。空列表时列出一个降级入口，
+        // 填进去的令牌必然被拒——那正好是「列了用不了的方式」的坏例子
+        if (properties.getAuth().hasStaticTokens()) {
+            methods.add(ConsoleDtos.AuthMethod.STATIC_TOKEN);
+        }
         return methods;
     }
 

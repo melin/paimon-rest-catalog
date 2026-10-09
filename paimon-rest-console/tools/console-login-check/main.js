@@ -109,7 +109,16 @@ check('下发用户名密码方式', auth.supports('password'))
 check('它排在第一位（不需要先建主体）', auth.state.methods[0] === 'password',
   auth.state.methods.join(', '))
 check('下发客户端凭据方式', auth.supports('client-credentials'))
-check('下发静态令牌方式', auth.supports('static-token'))
+// 静态令牌的页签只在服务端登记过令牌时出现，而本脚本的 STATIC_TOKEN 与启动参数
+// `paimon.rest.auth.tokens[0]` 是同一个值，因此它正好是这条规则的判据：
+// 给了就该出现，没给就不该出现。两种都是被断言的行为，没有「跳过」这一档——
+// 不显示一个填了也进不去的页签，正是这次改动的目的
+if (STATIC_TOKEN) {
+  check('登记过静态令牌，因此下发静态令牌方式', auth.supports('static-token'))
+} else {
+  check('没登记静态令牌，因此不下发该方式（登录页不显示这个页签）',
+    !auth.supports('static-token'), auth.state.methods.join(', '))
+}
 check('匿名时未认证', auth.state.authenticated === false)
 check('因此需要登录', auth.loginRequired() === true)
 check('令牌端点用 Polaris 路径',

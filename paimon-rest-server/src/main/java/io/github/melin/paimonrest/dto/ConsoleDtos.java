@@ -107,7 +107,10 @@ public final class ConsoleDtos {
      *                      与 {@code authEnabled} 分开返回，因为控制台需要据此显示一句
      *                      区别很大的话：门禁开着而整体鉴权关着时，数据接口仍然匿名可调，
      *                      这层登录只挡住界面，不是安全边界
-     * @param methods       可用的登录方式，取值见 {@link AuthMethod}；顺序即建议的展示顺序
+     * @param methods       可用的登录方式，取值见 {@link AuthMethod}；顺序即建议的展示顺序。
+     *                      <b>只列真的可用的方式</b>：各自按配置判定，关闭或缺配置就不出现。
+     *                      因此 {@code consoleRequired=true} 时它仍可能为空——那说明服务端
+     *                      要求登录却一个方式都没开，属于配置错误，前端会照实提示
      * @param tokenEndpoint 客户端凭据流程要 POST 的地址（绝对路径，不含主机名）
      * @param oidc          OIDC 方式可用时的连接参数；不可用时为 {@code null}
      * @param session       当前令牌的状态；未携带令牌或令牌无效时 {@code authenticated=false}
@@ -145,6 +148,10 @@ public final class ConsoleDtos {
          * <p>这是给机器与脚本准备的降级入口，不是给人用的正常路径——
          * 要求使用者自己去拿 {@code paimon.rest.auth.tokens} 里的值。
          * 它在列表里排最后，正是为了不鼓励这条路。
+         *
+         * <p><b>只在 {@code paimon.rest.auth.tokens} 里登记了令牌时才出现。</b>
+         * 它没有独立的 {@code enabled} 开关，「开启」的唯一表现就是配置里有值；
+         * 没配就列出来，使用者填什么都会被拒。
          */
         public static final String STATIC_TOKEN = "static-token";
 

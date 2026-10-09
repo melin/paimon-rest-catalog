@@ -115,7 +115,7 @@ mysql -h 127.0.0.1 -u root -p < sql/schema-mysql.sql
 # 全量构建
 JAVA_HOME=/path/to/jdk-21 ./mvnw -DskipTests install
 
-# 运行全部测试（服务端 224 + Spark 76，共 300 个用例）
+# 运行全部测试（服务端 226 + Spark 76，共 302 个用例）
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
 
 # 启动服务端（默认 8080 端口，连 MySQL，预置 catalog prefix=paimon 与 database=default）
@@ -177,7 +177,9 @@ Management API（catalog、主体、服务角色、catalog 角色与 grants）�
 控制台**默认就要求登录**（`paimon.rest.auth.console.required=true`），
 默认账号密码 `admin/admin` —— 装好即可进入，不需要先建主体。
 登录方式有三种可同时启用（用户名密码 / 主体凭据 / 外部 IdP 的 SSO），
-也可以直接在「连接设置」里填静态令牌。完整说明见第 9 节与
+也可以直接在「连接设置」里填静态令牌。**登录页只列出服务端真的开启了的方式**：
+关掉的、没配令牌的都不显示，一个都没开时页面会说明该开哪个配置项。
+完整说明见第 9 节与
 [`docs/console.md`](docs/console.md)（控制台总览）、
 [`docs/console-table-detail.md`](docs/console-table-detail.md)（表详情页）、
 [`docs/console-auth.md`](docs/console-auth.md)（登录与鉴权）。
@@ -292,7 +294,7 @@ Catalog 侧与鉴权：
 | `paimon.rest.max-page-size` | `1000` | 分页大小上限 |
 | `paimon.rest.auth.enabled` | `false` | 是否要求数据接口带 Bearer 令牌（`/v1/**`、`/api/catalog/v1/**`、`/api/management/v1/**`） |
 | `paimon.rest.auth.principal` | `anonymous` | 认证关闭或未带令牌时使用的主体名 |
-| `paimon.rest.auth.tokens` | 空 | 允许的静态令牌列表（给机器用） |
+| `paimon.rest.auth.tokens` | 空 | 允许的静态令牌列表（给机器用）；**配置了才会在登录页出现「静态令牌」页签** |
 | `paimon.rest.auth.token-principals` | 空 | 静态令牌 → 主体名映射；未登记时退化为「令牌即主体名」（审计列放不下的长度会记摘要，见第 6 节第 19 条） |
 | `paimon.rest.auth.access-token.ttl` | `1h` | 控制台签发的访问令牌有效期（唯一能限制令牌泄露窗口的参数） |
 | `paimon.rest.auth.access-token.signing-key` | 空 | HS256 签名密钥，Base64 且解码后 ≥32 字节；**留空则每次启动随机生成**（多实例互不认、重启掉线），生产必须配 |
@@ -474,7 +476,7 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
 
 ## 7. 测试
 
-### 单元与集成测试（300 个用例）
+### 单元与集成测试（302 个用例）
 
 ```bash
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
@@ -483,7 +485,7 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 测试连的是内存 H2（`test` profile，见 `src/test/resources/application-test.yml`），
 **不依赖本机是否有 MySQL**。
 
-服务端（224 个）：
+服务端（226 个）：
 
 | 测试类 | 覆盖 |
 | --- | --- |
@@ -498,6 +500,7 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 | `CatalogEndpointAuthorizationTests` | 从运行时请求映射枚举全部 `/v1/{prefix}/**` 端点，逐一核对授权映射是否已登记——新增端点若忘记登记映射会让构建失败 |
 | `ConsoleApiTests` | 控制台的托管与元数据：`/console` 重定向、目录式路径转发入口页、深链回退、缺失 assets 仍 404、已提交入口页引用的产物都存在、meta 的枚举与权限分组跟着规格走、登录引导同时如实返回 `authEnabled` 与 `consoleRequired`、门禁开着时控制台端点拒匿名而数据面仍开放（见第 9 节） |
 | `ConsoleAuthEndpointTests` | 控制台登录在 HTTP 层的端到端：豁免端点可达而受保护端点拒绝匿名、**用户名密码登录成功/失败/缺参/限速与默认 `admin/admin`**、令牌签发与使用、错误密钥 401 与 `WWW-Authenticate`、**clientId 与用户名两种「不存在」的报文都与「密码不对」一字不差**、`invalid_scope` / `unsupported_grant_type`、Basic 与 JSON 体、失败限速、静态令牌映射、伪造 JWT 与畸形头。这一层才会暴露接线错误——排除列表写错、响应字段名写成驼峰、令牌端点自己反被鉴权挡住 |
+| `ConsoleAuthMethodVisibilityTests` | 登录方式的可见性：**没开启的方式不出现在登录引导里**——关掉 `console.client-credentials.enabled` 就不下发 `client-credentials`，`auth.tokens` 为空就不下发 `static-token`，而默认开启的用户名密码照旧（对照组，防「无脑返回空列表」） |
 | `AccessTokenServiceTests` | 访问令牌的签发与验证：claims、TTL 边界、换钥、篡改、换 issuer、无 `exp`、`alg:none`、签名密钥格式错必须启动失败、随机钥不共享 |
 | `JwtTests` | 纯 JDK 的 JWT 编解码与验签：HS256 / RS256 / ES256 往返、**ES256 的原始签名转 DER**、`alg:none` 与未知算法、结构拒绝、`aud` 单值与数组 |
 | `JwksTests` | JWKS 解析：RSA 与 EC 可用性（实测验签）、混合类型、不可用键跳过而非整份失败、私钥材料忽略、无 `kid` 与重复 `kid`、畸形文档 |
@@ -542,10 +545,12 @@ BASE=http://127.0.0.1:8080 ./scripts/management-sweep.sh
 # 控制台登录（HTTP 层）：登录引导、用户名密码登录、令牌端点的错误码、凭据校验、
 # 签发令牌、静态令牌、静态资源深链——63 项。需以 --paimon.rest.auth.enabled=true 启动，
 # 凭据取自启动日志里「created bootstrap principal」那行（仅在开了授权时才有；
-# 没开时先用默认账号密码登录、再调管理 API 建一个主体，见 docs/console-auth.md §11）
+# 没开时先用默认账号密码登录、再调管理 API 建一个主体，见 docs/console-auth.md §11）。
+# 第 1 节断言「登记了静态令牌，登录页才会有这个页签」，因此实例要一并配
+# --paimon.rest.auth.tokens[0]，否则那几条会如实报出「没出现」
 BASE=http://127.0.0.1:8080 \
 CLIENT_ID=<引导主体 clientId> CLIENT_SECRET=<明文密钥> \
-STATIC_TOKEN=<可选，需与启动参数 paimon.rest.auth.tokens[0] 一致> \
+STATIC_TOKEN=<需与启动参数 paimon.rest.auth.tokens[0] 一致，否则脚本会断言该方式不出现> \
   ./scripts/sweep-console-auth.sh
 
 # 前端登录逻辑：直接跑 src/store/auth.js 与 src/api/* 的真实代码——59 项

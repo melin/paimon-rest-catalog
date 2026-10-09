@@ -133,12 +133,16 @@ public class DataInitializer implements ApplicationRunner {
             return;
         }
 
-        List<String> methods = configuredMethods(console, oidc);
+        List<String> methods = configuredMethods(auth);
         if (methods.isEmpty()) {
-            log.warn("the console requires a login but all login methods are disabled"
-                    + " (paimon.rest.auth.console.password.enabled,"
-                    + " …client-credentials.enabled and …oidc.enabled): the web console can only be"
-                    + " used by pasting a token listed in paimon.rest.auth.tokens");
+            // 这一档在本次改动前只意味着「浏览器上没得选，还能贴一个静态令牌」。
+            // 现在静态令牌也按配置出现，因此这里是真的没有任何入口——
+            // 登录页会显示一条「服务端要求登录但没有开启任何方式」，运维得先解决它
+            log.warn("the console requires a login but no login method is available: enable one of"
+                    + " paimon.rest.auth.console.password.enabled,"
+                    + " …client-credentials.enabled or …oidc.enabled, or list a token in"
+                    + " paimon.rest.auth.tokens. Until then nobody can sign in to the web console"
+                    + " and every anonymous request is rejected.");
         } else {
             // 配置齐了就报告一行：运维需要从启动日志确认「登录是按我配的那样生效的」，
             // 而不是去试一次登录才知道
@@ -161,9 +165,16 @@ public class DataInitializer implements ApplicationRunner {
         }
     }
 
-    /** 已开启的登录方式（只看开关，不看 OIDC 的发现文档能不能拉到）。 */
-    private static List<String> configuredMethods(
-            RestServerProperties.Auth.Console console, RestServerProperties.Auth.Oidc oidc) {
+    /**
+     * 已配置的登录方式（只看配置，不看 OIDC 的发现文档能不能拉到）。
+     *
+     * <p>与 {@code /api/console/v1/auth} 下发的 {@code methods} 是同一套判据，因此要在
+     * 启动日志里如实列出：两者不一致时（日志里有、登录页上没有），运维会照着日志去
+     * 找一个并不存在的页签。唯一的差别是 OIDC——它在运行时还取决于发现文档，
+     * 那要发一次外部请求，不适合放在启动路径上。
+     */
+    private static List<String> configuredMethods(RestServerProperties.Auth auth) {
+        RestServerProperties.Auth.Console console = auth.getConsole();
         List<String> methods = new ArrayList<>();
         if (console.getPassword().isEnabled()) {
             methods.add("password");
@@ -171,8 +182,11 @@ public class DataInitializer implements ApplicationRunner {
         if (console.getClientCredentials().isEnabled()) {
             methods.add("client-credentials");
         }
-        if (oidc.isEnabled()) {
+        if (console.getOidc().isEnabled()) {
             methods.add("oidc");
+        }
+        if (auth.hasStaticTokens()) {
+            methods.add("static-token");
         }
         return methods;
     }

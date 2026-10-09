@@ -23,7 +23,8 @@
 #   BASE          服务地址，默认 http://127.0.0.1:8080
 #   CLIENT_ID     主体 clientId（必填）
 #   CLIENT_SECRET 主体明文密钥（必填）
-#   STATIC_TOKEN  静态令牌；给了就顺带验收那条降级路径
+#   STATIC_TOKEN  静态令牌；给了就顺带验收那条降级路径。服务端需同时配
+#                 --paimon.rest.auth.tokens[0]：第 1 节断言该页签只在登记了令牌时才出现
 #   PRINCIPAL     期望的主体名，默认 root（引导主体名）
 #   CONSOLE_USER  控制台账号，默认 admin（第 2 节用）
 #   CONSOLE_PASSWORD 控制台密码，默认 admin
@@ -147,7 +148,7 @@ jf true consoleRequired "控制台要求先登录"
 jhas methods password "可用的登录方式里有用户名密码"
 jf password methods.0 "用户名密码排在最前（不需要先建主体）"
 jhas methods client-credentials "可用的登录方式里有客户端凭据"
-jhas methods static-token "降级入口仍在列表里"
+jhas methods static-token "登记了 auth.tokens 时降级入口才出现在列表里"
 jf false session.authenticated "匿名时未认证"
 jf /api/catalog/v1/oauth/tokens tokenEndpoint "令牌端点与服务端常量一致"
 
