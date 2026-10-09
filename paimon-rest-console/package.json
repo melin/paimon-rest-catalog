@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Paimon REST 的 Web 管理控制台",
+  "description": "Paimon Rest Catalog 的 Web 管理控制台",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

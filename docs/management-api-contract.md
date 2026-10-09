@@ -9,7 +9,7 @@
 - 服务基址：`{scheme}://{host}/api/management/v1`（规格 `servers[0].url`）
 
 > 说明：规格将管理服务与 catalog 服务分成两份文档，但由同一进程承载。
-> 本实现据此在同一进程内同时暴露 `/api/management/v1/**`（本文档）与 `/v1/**`（Paimon REST）。
+> 本实现据此在同一进程内同时暴露 `/api/management/v1/**`（本文档）与 `/v1/**`（Paimon Rest Catalog）。
 
 ## 1. 端点清单
 

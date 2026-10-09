@@ -37,7 +37,7 @@ fi
 
 # 文件头固定，便于读者知道这是生成物以及如何重新生成
 cat >"$TARGET" <<'HEADER'
--- Paimon REST Server 元数据表结构（MySQL 8.0）
+-- Paimon Rest Catalog Server 元数据表结构（MySQL 8.0）
 --
 -- 本文件由 scripts/gen-mysql-ddl.sh 从 JPA 实体元数据生成，请勿手工修改：
 -- 手工改动会在下次生成时丢失，需要改结构请改实体后重新生成。

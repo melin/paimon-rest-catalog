@@ -1,4 +1,4 @@
-# Paimon REST Server 镜像。
+# Paimon Rest Catalog Server 镜像。
 #
 # 构建（在仓库根目录执行，构建上下文必须是根目录：需要同时看到父 POM 与子模块）：
 #   docker build -t paimon-rest-server:0.0.1 .

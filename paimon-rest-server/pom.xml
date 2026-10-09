@@ -17,7 +17,7 @@
 	<artifactId>paimon-rest-server</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name>paimon-rest-server</name>
-	<description>Apache Paimon REST 服务端：catalog API 与 Management API（Spring Boot + JPA）</description>
+	<description>Apache Paimon Rest Catalog 服务端：catalog API 与 Management API（Spring Boot + JPA）</description>
 
 	<properties>
 		<java.version>17</java.version>

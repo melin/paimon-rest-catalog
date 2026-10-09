@@ -11,7 +11,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 
 /**
- * Spark 通过 Paimon REST 建表的最小示例。
+ * Spark 通过 Paimon Rest Catalog 建表的最小示例。
  *
  * <p>与 {@code PaimonTableDdlTests} 的区别：那是断言用的测试，这是给人读的示例——
  * 每一步都打印出来，包括**直接读服务端 API 看到的元数据**。这一点是刻意的：
@@ -42,7 +42,7 @@ public final class SparkPaimonRestExample {
         try {
             System.out.println();
             System.out.println("============================================================");
-            System.out.println(" Spark → Paimon REST 示例");
+            System.out.println(" Spark → Paimon Rest Catalog 示例");
             System.out.println(" 服务端：" + uri);
             System.out.println("============================================================");
 

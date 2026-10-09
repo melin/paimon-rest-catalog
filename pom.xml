@@ -8,7 +8,7 @@
 	<version>0.0.1-SNAPSHOT</version>
 	<packaging>pom</packaging>
 	<name>paimon-rest-parent</name>
-	<description>Paimon REST 服务端与 Spark SQL 扩展</description>
+	<description>Paimon Rest Catalog 服务端与 Spark SQL 扩展</description>
 
 	<!--
 		聚合两个模块：

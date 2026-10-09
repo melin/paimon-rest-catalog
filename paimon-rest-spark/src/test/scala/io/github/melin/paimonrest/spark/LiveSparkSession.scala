@@ -41,7 +41,7 @@ object LiveSparkSession {
     private[spark] val token = System.getProperty("e2e.management.token", "")
 
     /**
-     * Paimon REST 的基址。
+     * Paimon Rest Catalog 的基址。
      *
      * <p>默认从管理 API 基址去掉 {@value #managementPath} 得到——两者本来就挂在
      * 同一个服务端上，这样只需给一个地址。需要指向别处时用

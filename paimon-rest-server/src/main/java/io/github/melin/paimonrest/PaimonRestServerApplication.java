@@ -6,7 +6,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 /**
- * Paimon REST 服务入口。
+ * Paimon Rest Catalog 服务入口。
  *
  * <p>服务实现 Apache Paimon 的 REST Catalog OpenAPI 规格（v1），
  * 元数据持久化在关系库中，通过 JPA 访问。

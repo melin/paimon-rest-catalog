@@ -2,7 +2,7 @@
 # Spark SQL 扩展对着真实服务端的端到端验收。
 #
 # 为什么需要它：spark 模块的其它测试都用桩管理 API，只能证明「客户端与自己的假设
-# 自洽」，证明不了「服务端真的接受这些请求」。本脚本起一个真实的 Paimon REST Server，
+# 自洽」，证明不了「服务端真的接受这些请求」。本脚本起一个真实的 Paimon Rest Catalog Server，
 # 用真实的 SparkSession 跑完整 SQL 链路，验证两侧实现的契约一致性。
 #
 # 用法：

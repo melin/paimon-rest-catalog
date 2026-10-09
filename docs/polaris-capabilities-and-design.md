@@ -1,4 +1,4 @@
-# Apache Polaris 核心能力与 Paimon REST 实现对照
+# Apache Polaris 核心能力与 Paimon Rest Catalog 实现对照
 
 本文先提炼 Apache Polaris 的核心能力，再说明这些能力如何映射到
 Apache Paimon 的 REST Catalog 规格，以及本仓库（Spring Boot + JPA 实现）的落点与差异。
@@ -36,13 +36,13 @@ Polaris 通过实现 Iceberg 的开放 REST Catalog 协议，让多个计算引�
 
 ---
 
-## 三、能力到 Paimon REST 的映射
+## 三、能力到 Paimon Rest Catalog 的映射
 
 Paimon 的 REST Catalog 规格遵循同一范式，但对象模型不同：Polaris 面向 Iceberg
 （快照 + manifest 清单 + 分区规格），Paimon 的规格则额外覆盖分区登记与统计、分支、标签、
 流式消费者、函数与语义视图，并自带数据访问授权端点。
 
-| Polaris 能力 | Paimon REST 对应 | 本实现落点 |
+| Polaris 能力 | Paimon Rest Catalog 对应 | 本实现落点 |
 | --- | --- | --- |
 | 标准 REST Catalog 契约 | REST Catalog API v1，60 个端点 | `web/` 下 10 个控制器，路径与 operationId 一一对应 |
 | 统一鉴权 | 规格声明 `bearerAuth` 安全方案 | `BearerAuthInterceptor` 挂在 `/v1/**`，业务层只读 `RequestContext.principal()` |

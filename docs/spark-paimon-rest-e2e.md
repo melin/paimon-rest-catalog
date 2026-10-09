@@ -1,6 +1,6 @@
-# 用 Spark SQL 通过 Paimon REST 建表
+# 用 Spark SQL 通过 Paimon Rest Catalog 建表
 
-本文说明怎么把 Spark 接到本服务端的 Paimon REST 上、用 SQL 建 Paimon 表，
+本文说明怎么把 Spark 接到本服务端的 Paimon Rest Catalog 上、用 SQL 建 Paimon 表，
 以及哪些能力已经可用、哪些还不在范围内。
 
 会用到本文的场景：
@@ -198,7 +198,7 @@ RuntimeException: Exception occurs when preparing snapshot #1 by user <uuid> wit
 
 原因不在本服务端「拒绝」了写入：Paimon 客户端把数据文件按 `path` 写到了仓库
 （分区目录与 parquet 文件都正常生成），随后提交快照时要在仓库里找到 Paimon 自己维护的
-`schema/schema-<n>` 文件——那是 Paimon REST 服务端应当写入的，本服务端目前没有做。
+`schema/schema-<n>` 文件——那是 Paimon Rest Catalog 服务端应当写入的，本服务端目前没有做。
 这是一个明确的缺口，不是配置问题。
 
 `PaimonTableDdlTests.createTableAsSelectNeedsADataPlaneTheCatalogDoesNotHave` 是这条边界的

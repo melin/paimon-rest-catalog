@@ -12,7 +12,7 @@
       <div class="pc-login-brand">
         <div class="pc-login-mark">P</div>
         <div>
-          <div class="pc-login-name">Paimon REST</div>
+          <div class="pc-login-name">Paimon Rest Catalog</div>
           <div class="pc-login-sub">管理控制台</div>
         </div>
       </div>

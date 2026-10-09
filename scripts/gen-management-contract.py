@@ -77,7 +77,7 @@ w(f"- 规模：**{len(PATHS)} 个路径、{sum(1 for p in PATHS.values() for m i
 w("- 服务基址：`{scheme}://{host}/api/management/v1`（规格 `servers[0].url`）")
 w("")
 w("> 说明：规格将管理服务与 catalog 服务分成两份文档，但由同一进程承载。")
-w("> 本实现据此在同一进程内同时暴露 `/api/management/v1/**`（本文档）与 `/v1/**`（Paimon REST）。")
+w("> 本实现据此在同一进程内同时暴露 `/api/management/v1/**`（本文档）与 `/v1/**`（Paimon Rest Catalog）。")
 w("")
 
 # ---------------------------------------------------------------- endpoints

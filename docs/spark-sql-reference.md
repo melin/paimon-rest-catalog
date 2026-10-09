@@ -1,6 +1,6 @@
 # Spark SQL 管理语法参考
 
-`paimon-rest-spark` 把 Paimon REST 的管理 API 接进 Spark SQL：主体（principal）、
+`paimon-rest-spark` 把 Paimon Rest Catalog 的管理 API 接进 Spark SQL：主体（principal）、
 角色（principal role / catalog role）与资源授权可以用 21 条 SQL 语句管理，
 不必手写 HTTP 请求。
 

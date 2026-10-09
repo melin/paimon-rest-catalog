@@ -1,4 +1,4 @@
-# Paimon REST Server。
+# Paimon Rest Catalog Server。
 #
 # 镜像来自仓库根目录的 Dockerfile（多阶段构建，运行时是 JRE 21 + 一个 jar）：
 #   docker build -t paimon-rest-server:0.0.1 .

@@ -1,7 +1,7 @@
-# Spark 通过 Paimon REST 建表：可运行示例
+# Spark 通过 Paimon Rest Catalog 建表：可运行示例
 
-这个目录是一个能直接跑通的示例：自动起一个 Paimon REST Server，
-用 Spark SQL 经 Paimon REST 建两张 Paimon 表，
+这个目录是一个能直接跑通的示例：自动起一个 Paimon Rest Catalog Server，
+用 Spark SQL 经 Paimon Rest Catalog 建两张 Paimon 表，
 然后把**服务端侧看到的元数据**打印出来。
 
 | 文件 | 作用 |

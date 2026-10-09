@@ -21,7 +21,7 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Paimon REST Management API 的客户端。
+ * Paimon Rest Catalog Management API 的客户端。
  *
  * <p>只依赖 JDK 自带的 {@link HttpClient} 与 Spark 自带的 Jackson 2，不引入额外 HTTP 库：
  * 这个模块最终会被放进 Spark 的 classpath，额外依赖会与集群已有版本冲突。
