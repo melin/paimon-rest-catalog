@@ -1,7 +1,7 @@
 <template>
   <div class="pc-page pc-browse">
     <PageHeader
-      title="目录浏览"
+      title="Catalog"
       :subtitle="`浏览 catalog「${prefix || '未选择'}」下的库与对象。列表与操作走 catalog API（/v1/{prefix}/...），与引擎客户端看到的是同一份元数据。`"
     >
       <template #actions>
@@ -114,10 +114,10 @@
                     </RouterLink>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="180" align="right">
+                <el-table-column label="操作" width="110" align="right">
                   <template #default="{ row }">
-                    <el-button size="small" text @click="openRenameTable(row)">重命名</el-button>
-                    <el-button size="small" text type="danger" @click="confirmDropTable(row)">删除</el-button>
+                    <IconAction icon="EditPen" label="重命名" @click="openRenameTable(row)" />
+                    <IconAction icon="Delete" label="删除" type="danger" @click="confirmDropTable(row)" />
                   </template>
                 </el-table-column>
               </el-table>
@@ -135,11 +135,11 @@
               </div>
               <el-table v-loading="viewsList.loading.value" :data="viewsList.items.value" size="small">
                 <el-table-column prop="name" label="视图名" min-width="200" />
-                <el-table-column label="操作" width="220" align="right">
+                <el-table-column label="操作" width="150" align="right">
                   <template #default="{ row }">
-                    <el-button size="small" text @click="showView(row)">详情</el-button>
-                    <el-button size="small" text @click="openRenameView(row.name)">重命名</el-button>
-                    <el-button size="small" text type="danger" @click="confirmDropView(row.name)">删除</el-button>
+                    <IconAction icon="View" label="详情" @click="showView(row)" />
+                    <IconAction icon="EditPen" label="重命名" @click="openRenameView(row.name)" />
+                    <IconAction icon="Delete" label="删除" type="danger" @click="confirmDropView(row.name)" />
                   </template>
                 </el-table-column>
               </el-table>
@@ -157,10 +157,10 @@
               </div>
               <el-table v-loading="functionsList.loading.value" :data="functionsList.items.value" size="small">
                 <el-table-column prop="name" label="函数名" min-width="200" />
-                <el-table-column label="操作" width="180" align="right">
+                <el-table-column label="操作" width="110" align="right">
                   <template #default="{ row }">
-                    <el-button size="small" text @click="showFunction(row)">详情</el-button>
-                    <el-button size="small" text type="danger" @click="confirmDropFunction(row.name)">删除</el-button>
+                    <IconAction icon="View" label="详情" @click="showFunction(row)" />
+                    <IconAction icon="Delete" label="删除" type="danger" @click="confirmDropFunction(row.name)" />
                   </template>
                 </el-table-column>
               </el-table>
@@ -173,11 +173,11 @@
               </div>
               <el-table v-loading="semanticViewsList.loading.value" :data="semanticViewsList.items.value" size="small">
                 <el-table-column prop="name" label="名称" min-width="200" />
-                <el-table-column label="操作" width="240" align="right">
+                <el-table-column label="操作" width="150" align="right">
                   <template #default="{ row }">
-                    <el-button size="small" text @click="showSemanticView(row)">查看定义</el-button>
-                    <el-button size="small" text @click="openUpsertSemanticView(row)">编辑</el-button>
-                    <el-button size="small" text type="danger" @click="confirmDropSemanticView(row)">删除</el-button>
+                    <IconAction icon="View" label="查看定义" @click="showSemanticView(row)" />
+                    <IconAction icon="Edit" label="编辑" @click="openUpsertSemanticView(row)" />
+                    <IconAction icon="Delete" label="删除" type="danger" @click="confirmDropSemanticView(row)" />
                   </template>
                 </el-table-column>
               </el-table>
@@ -461,6 +461,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import FieldLabel from '@/components/FieldLabel.vue'
+import IconAction from '@/components/IconAction.vue'
 import JsonBlock from '@/components/JsonBlock.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PropertiesEditor from '@/components/PropertiesEditor.vue'

@@ -43,11 +43,11 @@
           <el-table-column label="版本" width="70" align="right">
             <template #default="{ row }"><span class="pc-mono">{{ row.entityVersion ?? '—' }}</span></template>
           </el-table-column>
-          <el-table-column label="操作" width="230" fixed="right">
+          <el-table-column label="操作" width="160" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" text type="primary" @click="openDetail(row)">成员与角色</el-button>
-              <el-button size="small" text @click="openEdit(row)">编辑</el-button>
-              <el-button size="small" text type="danger" @click="confirmDelete(row)">删除</el-button>
+              <IconAction icon="User" label="成员与角色" type="primary" @click="openDetail(row)" />
+              <IconAction icon="Edit" label="编辑" @click="openEdit(row)" />
+              <IconAction icon="Delete" label="删除" type="danger" @click="confirmDelete(row)" />
             </template>
           </el-table-column>
         </el-table>
@@ -150,9 +150,9 @@
             <el-table-column label="创建时间" width="170">
               <template #default="{ row }"><TimeText :millis="row.createTimestamp" /></template>
             </el-table-column>
-            <el-table-column label="" width="90" align="right">
+            <el-table-column label="" width="70" align="right">
               <template #default="{ row }">
-                <el-button size="small" text type="danger" @click="revokeCatalogRole(row.name)">移除</el-button>
+                <IconAction icon="Close" label="移除" type="danger" @click="revokeCatalogRole(row.name)" />
               </template>
             </el-table-column>
           </el-table>
@@ -167,6 +167,7 @@ import { computed, reactive } from 'vue'
 
 import CopyText from '@/components/CopyText.vue'
 import FieldLabel from '@/components/FieldLabel.vue'
+import IconAction from '@/components/IconAction.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import PropertiesEditor from '@/components/PropertiesEditor.vue'

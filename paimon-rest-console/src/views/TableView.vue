@@ -154,11 +154,14 @@
                   <span class="pc-mono pc-break">{{ compact(row) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="90" align="right">
+              <el-table-column label="操作" width="70" align="right">
                 <template #default="{ $index }">
-                  <el-button size="small" text type="danger" @click="pendingChanges.splice($index, 1)">
-                    移除
-                  </el-button>
+                  <IconAction
+                    icon="Close"
+                    label="移除"
+                    type="danger"
+                    @click="pendingChanges.splice($index, 1)"
+                  />
                 </template>
               </el-table-column>
             </el-table>
@@ -214,10 +217,10 @@
               <el-table-column label="增量记录数" width="110" align="right">
                 <template #default="{ row }">{{ formatNumber(row.deltaRecordCount) }}</template>
               </el-table-column>
-              <el-table-column label="" width="150" align="right">
+              <el-table-column label="" width="110" align="right">
                 <template #default="{ row }">
-                  <el-button size="small" text @click="showSnapshot(row)">详情</el-button>
-                  <el-button size="small" text type="danger" @click="rollbackToSnapshot(row)">回滚</el-button>
+                  <IconAction icon="View" label="详情" @click="showSnapshot(row)" />
+                  <IconAction icon="RefreshLeft" label="回滚" type="danger" @click="rollbackToSnapshot(row)" />
                 </template>
               </el-table-column>
             </el-table>
@@ -251,10 +254,10 @@
               <el-table-column label="保留时长" width="110">
                 <template #default="{ row }">{{ orPlaceholder(row.tagTimeRetained) }}</template>
               </el-table-column>
-              <el-table-column label="" width="150" align="right">
+              <el-table-column label="" width="110" align="right">
                 <template #default="{ row }">
-                  <el-button size="small" text type="danger" @click="rollbackToTag(row.tagName)">回滚</el-button>
-                  <el-button size="small" text type="danger" @click="confirmDropTag(row.tagName)">删除</el-button>
+                  <IconAction icon="RefreshLeft" label="回滚" type="danger" @click="rollbackToTag(row.tagName)" />
+                  <IconAction icon="Delete" label="删除" type="danger" @click="confirmDropTag(row.tagName)" />
                 </template>
               </el-table-column>
             </el-table>
@@ -279,13 +282,11 @@
               <el-table-column prop="branchName" label="分支名" min-width="200">
                 <template #default="{ row }">{{ row.branchName || row.name || row }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="240" align="right">
+              <el-table-column label="操作" width="160" align="right">
                 <template #default="{ row }">
-                  <el-button size="small" text @click="openRenameBranch(branchName(row))">重命名</el-button>
-                  <el-button size="small" text @click="forwardBranch(branchName(row))">推进到最新</el-button>
-                  <el-button size="small" text type="danger" @click="confirmDropBranch(branchName(row))">
-                    删除
-                  </el-button>
+                  <IconAction icon="EditPen" label="重命名" @click="openRenameBranch(branchName(row))" />
+                  <IconAction icon="DArrowRight" label="推进到最新" @click="forwardBranch(branchName(row))" />
+                  <IconAction icon="Delete" label="删除" type="danger" @click="confirmDropBranch(branchName(row))" />
                 </template>
               </el-table-column>
             </el-table>
@@ -383,9 +384,9 @@
               <el-table-column label="权限" min-width="280">
                 <template #default="{ row }"><span class="pc-mono">{{ row.privilege }}</span></template>
               </el-table-column>
-              <el-table-column label="" width="90" align="right">
+              <el-table-column label="" width="70" align="right">
                 <template #default="{ row }">
-                  <el-button size="small" text type="danger" @click="revokeTableGrant(row)">撤销</el-button>
+                  <IconAction icon="Remove" label="撤销" type="danger" @click="revokeTableGrant(row)" />
                 </template>
               </el-table-column>
             </el-table>
@@ -485,6 +486,7 @@ import { useRoute } from 'vue-router'
 
 import CopyText from '@/components/CopyText.vue'
 import JsonBlock from '@/components/JsonBlock.vue'
+import IconAction from '@/components/IconAction.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import ResourceState from '@/components/ResourceState.vue'

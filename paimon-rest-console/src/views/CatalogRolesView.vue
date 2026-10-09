@@ -50,12 +50,12 @@
             <el-table-column label="版本" width="70" align="right">
               <template #default="{ row }"><span class="pc-mono">{{ row.entityVersion ?? '—' }}</span></template>
             </el-table-column>
-            <el-table-column label="操作" width="270" fixed="right">
+            <el-table-column label="操作" width="200" fixed="right">
               <template #default="{ row }">
-                <el-button size="small" text type="primary" @click="openGrants(row)">授权</el-button>
-                <el-button size="small" text @click="openHolders(row)">持有者</el-button>
-                <el-button size="small" text @click="openEdit(row)">编辑</el-button>
-                <el-button size="small" text type="danger" @click="confirmDelete(row)">删除</el-button>
+                <IconAction icon="Key" label="授权" type="primary" @click="openGrants(row)" />
+                <IconAction icon="User" label="持有者" @click="openHolders(row)" />
+                <IconAction icon="Edit" label="编辑" @click="openEdit(row)" />
+                <IconAction icon="Delete" label="删除" type="danger" @click="confirmDelete(row)" />
               </template>
             </el-table-column>
           </el-table>
@@ -161,9 +161,9 @@
               <span class="pc-mono">{{ row.privilege }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="" width="90" align="right">
+          <el-table-column label="" width="70" align="right">
             <template #default="{ row }">
-              <el-button size="small" text type="danger" @click="revokeGrant(row)">撤销</el-button>
+              <IconAction icon="Remove" label="撤销" type="danger" @click="revokeGrant(row)" />
             </template>
           </el-table-column>
         </el-table>
@@ -200,6 +200,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import IconAction from '@/components/IconAction.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PanelCard from '@/components/PanelCard.vue'
 import PropertiesEditor from '@/components/PropertiesEditor.vue'

@@ -51,7 +51,7 @@
         <div class="pc-spacer" />
 
         <div class="pc-header-ctl">
-          <span class="pc-header-label">当前目录</span>
+          <span class="pc-header-label">当前 Catalog</span>
           <el-select
             :model-value="session.state.selectedCatalog"
             class="pc-catalog-select"
