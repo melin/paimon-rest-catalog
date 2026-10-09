@@ -20,65 +20,75 @@
     <ResourceState :loading="overview.loading.value" :error="overview.error.value" />
 
     <template v-if="table0">
-      <PanelCard title="基本信息">
-        <dl class="pc-kv">
-          <dt>表 ID</dt>
-          <dd><CopyText :text="table0.id" /></dd>
-          <dt>是否外部表</dt>
-          <dd>{{ table0.isExternal ? '是（注册进来的表）' : '否（由本服务管理）' }}</dd>
-          <dt>Schema 版本</dt>
-          <dd class="pc-mono">{{ table0.schemaId ?? '—' }}</dd>
-          <dt>路径</dt>
-          <dd><CopyText :text="table0.path" /></dd>
-          <dt>Owner</dt>
-          <dd>{{ orPlaceholder(table0.owner) }}</dd>
-          <dt>创建</dt>
-          <dd><TimeText :millis="table0.createdAt" /> · {{ orPlaceholder(table0.createdBy) }}</dd>
-          <dt>更新</dt>
-          <dd><TimeText :millis="table0.updatedAt" /> · {{ orPlaceholder(table0.updatedBy) }}</dd>
-        </dl>
-      </PanelCard>
-
-      <!------------------------------ 最新快照统计 ------------------------------>
-      <div class="pc-stats pc-stats-tight" v-if="latest">
-        <div class="pc-stat">
-          <div class="pc-stat-label">记录数（最新快照）</div>
-          <div class="pc-stat-value">{{ formatNumber(latest.recordCount) }}</div>
-          <div class="pc-stat-foot">累计写入，含历史文件</div>
-        </div>
-        <div class="pc-stat">
-          <div class="pc-stat-label">数据文件数</div>
-          <div class="pc-stat-value">{{ formatNumber(latest.fileCount) }}</div>
-          <div class="pc-stat-foot">最新快照引用的文件</div>
-        </div>
-        <div class="pc-stat">
-          <div class="pc-stat-label">数据文件大小</div>
-          <div class="pc-stat-value">{{ formatBytes(latest.fileSizeInBytes) }}</div>
-          <div class="pc-stat-foot">不含快照与清单文件</div>
-        </div>
-        <div class="pc-stat">
-          <div class="pc-stat-label">最近文件写入</div>
-          <div class="pc-stat-value pc-stat-value-sm">
-            {{ latest.lastFileCreationTime ? relativeTime(latest.lastFileCreationTime) : '—' }}
-          </div>
-          <div class="pc-stat-foot">最新快照 ID：{{ latest.snapshot?.id ?? '—' }}</div>
-        </div>
-      </div>
-
       <PanelCard flush>
         <el-tabs v-model="tab" class="pc-tabs" @tab-change="onTabChange">
+          <el-tab-pane label="详细信息" name="details" />
           <el-tab-pane label="Schema" name="schema" />
           <el-tab-pane label="变更" name="changes" />
           <el-tab-pane label="快照" name="snapshots" />
           <el-tab-pane label="标签" name="tags" />
           <el-tab-pane label="分支" name="branches" />
           <el-tab-pane label="分区" name="partitions" />
+          <el-tab-pane label="权限" name="grants" />
           <el-tab-pane label="数据访问" name="access" />
         </el-tabs>
 
         <div class="pc-tab-body">
+          <!------------------------------ 详细信息 -------------------------------->
+          <template v-if="tab === 'details'">
+            <div class="pc-stats pc-stats-tight" v-if="latest">
+              <div class="pc-stat">
+                <div class="pc-stat-label">记录数（最新快照）</div>
+                <div class="pc-stat-value">{{ formatNumber(latest.recordCount) }}</div>
+                <div class="pc-stat-foot">累计写入，含历史文件</div>
+              </div>
+              <div class="pc-stat">
+                <div class="pc-stat-label">数据文件数</div>
+                <div class="pc-stat-value">{{ formatNumber(latest.fileCount) }}</div>
+                <div class="pc-stat-foot">最新快照引用的文件</div>
+              </div>
+              <div class="pc-stat">
+                <div class="pc-stat-label">数据文件大小</div>
+                <div class="pc-stat-value">{{ formatBytes(latest.fileSizeInBytes) }}</div>
+                <div class="pc-stat-foot">不含快照与清单文件</div>
+              </div>
+              <div class="pc-stat">
+                <div class="pc-stat-label">最近文件写入</div>
+                <div class="pc-stat-value pc-stat-value-sm">
+                  {{ latest.lastFileCreationTime ? relativeTime(latest.lastFileCreationTime) : '—' }}
+                </div>
+                <div class="pc-stat-foot">最新快照 ID：{{ latest.snapshot?.id ?? '—' }}</div>
+              </div>
+            </div>
+
+            <div class="pc-detail-grid">
+              <dl class="pc-kv">
+                <dt>表 ID</dt>
+                <dd><CopyText :text="table0.id" /></dd>
+                <dt>是否外部表</dt>
+                <dd>{{ table0.isExternal ? '是（注册进来的表）' : '否（由本服务管理）' }}</dd>
+                <dt>Schema 版本</dt>
+                <dd class="pc-mono">{{ table0.schemaId ?? '—' }}</dd>
+                <dt>路径</dt>
+                <dd><CopyText :text="table0.path" /></dd>
+                <dt>Owner</dt>
+                <dd>{{ orPlaceholder(table0.owner) }}</dd>
+                <dt>创建</dt>
+                <dd><TimeText :millis="table0.createdAt" /> · {{ orPlaceholder(table0.createdBy) }}</dd>
+                <dt>更新</dt>
+                <dd><TimeText :millis="table0.updatedAt" /> · {{ orPlaceholder(table0.updatedBy) }}</dd>
+              </dl>
+              <JsonBlock
+                :value="table0.schema?.options || {}"
+                label="表属性（options）"
+                empty-text="没有表属性"
+                max-height="300px"
+              />
+            </div>
+          </template>
+
           <!-------------------------------- Schema -------------------------------->
-          <template v-if="tab === 'schema'">
+          <template v-else-if="tab === 'schema'">
             <el-table :data="table0.schema?.fields || []" size="small">
               <el-table-column prop="id" label="ID" width="64" align="right" />
               <el-table-column prop="name" label="字段名" min-width="160" />
@@ -91,22 +101,14 @@
               <el-table-column prop="defaultValue" label="默认值" min-width="110" />
             </el-table>
 
-            <div class="pc-schema-meta">
-              <dl class="pc-kv">
-                <dt>分区键</dt>
-                <dd>{{ (table0.schema?.partitionKeys || []).join(', ') || '（未分区）' }}</dd>
-                <dt>主键</dt>
-                <dd>{{ (table0.schema?.primaryKeys || []).join(', ') || '（无主键表）' }}</dd>
-                <dt>表注释</dt>
-                <dd>{{ orPlaceholder(table0.schema?.comment) }}</dd>
-              </dl>
-              <JsonBlock
-                :value="table0.schema?.options || {}"
-                label="表属性（options）"
-                empty-text="没有表属性"
-                max-height="240px"
-              />
-            </div>
+            <dl class="pc-kv pc-schema-meta">
+              <dt>分区键</dt>
+              <dd>{{ (table0.schema?.partitionKeys || []).join(', ') || '（未分区）' }}</dd>
+              <dt>主键</dt>
+              <dd>{{ (table0.schema?.primaryKeys || []).join(', ') || '（无主键表）' }}</dd>
+              <dt>表注释</dt>
+              <dd>{{ orPlaceholder(table0.schema?.comment) }}</dd>
+            </dl>
           </template>
 
           <!-------------------------------- 变更 ---------------------------------->
@@ -328,6 +330,67 @@
             </el-table>
           </template>
 
+          <!-------------------------------- 权限 ---------------------------------->
+          <template v-else-if="tab === 'grants'">
+            <el-alert type="info" :closable="false" show-icon class="pc-hint">
+              <template #title>授权挂在 catalog 角色上，增删需要 CATALOG_MANAGE_ACCESS</template>
+              <div>
+                管理规格没有「按资源反查授权」的端点，这里的列表是把每个 catalog 角色的授权
+                取回后过滤出作用到这张表的条目。新增授权逐项提交，服务端幂等，重复授予不报错。
+              </div>
+            </el-alert>
+
+            <div class="pc-tg-form">
+              <el-select v-model="grantForm.role" size="small" filterable placeholder="Catalog 角色" class="pc-tg-role">
+                <el-option v-for="role in grantRoles" :key="role" :label="role" :value="role" />
+              </el-select>
+              <el-select
+                v-model="grantForm.privileges"
+                size="small"
+                multiple
+                filterable
+                collapse-tags
+                collapse-tags-tooltip
+                placeholder="选择权限（可多选）"
+                class="pc-tg-priv"
+              >
+                <el-option v-for="privilege in tablePrivileges" :key="privilege" :label="privilege" :value="privilege" />
+              </el-select>
+              <el-button
+                size="small"
+                type="primary"
+                :loading="grantSaving"
+                :disabled="!grantForm.role || !grantForm.privileges.length"
+                @click="submitGrants"
+              >
+                授予{{ grantForm.privileges.length ? `（${grantForm.privileges.length}）` : '' }}
+              </el-button>
+              <el-button size="small" :loading="grantsState.loading" @click="loadGrants">刷新</el-button>
+            </div>
+
+            <el-alert v-if="grantsState.error" type="error" :closable="false" show-icon class="pc-hint">
+              <template #title>加载授权失败</template>
+              <div>{{ grantsState.error }}</div>
+            </el-alert>
+
+            <el-table
+              v-loading="grantsState.loading"
+              :data="grantsState.rows"
+              size="small"
+              empty-text="还没有 catalog 角色的授权作用到这张表"
+            >
+              <el-table-column prop="roleName" label="Catalog 角色" min-width="180" />
+              <el-table-column label="权限" min-width="280">
+                <template #default="{ row }"><span class="pc-mono">{{ row.privilege }}</span></template>
+              </el-table-column>
+              <el-table-column label="" width="90" align="right">
+                <template #default="{ row }">
+                  <el-button size="small" text type="danger" @click="revokeTableGrant(row)">撤销</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </template>
+
           <!------------------------------- 数据访问 -------------------------------->
           <template v-else>
             <div class="pc-access">
@@ -427,8 +490,10 @@ import PanelCard from '@/components/PanelCard.vue'
 import ResourceState from '@/components/ResourceState.vue'
 import TimeText from '@/components/TimeText.vue'
 import { catalogApi } from '@/api/catalog.js'
+import { managementApi } from '@/api/management.js'
 import { describeError } from '@/api/client.js'
 import { confirmDanger, notifyError, notifySuccess, useResource } from '@/composables/index.js'
+import { session } from '@/store/session.js'
 import {
   formatBytes,
   formatNumber,
@@ -438,10 +503,13 @@ import {
 } from '@/utils/format.js'
 
 /**
- * 表详情。七个页签对应 catalog API 里以单张表为作用域的全部端点。
+ * 表详情。九个页签：八个对应 catalog API 里以单张表为作用域的端点，
+ * 另有一个组合页签——「详细信息」汇总单表元数据（基本信息 + 快照统计 + options），
+ * 「权限」组合管理 API 的授权端点。
  *
- * <p>除「Schema」外都按需加载：切到某个页签才发它的请求。
- * 打开一张表就发六个请求，在远端仓库上会让页面明显变慢。
+ * <p>「详细信息」「Schema」「变更」「数据访问」只用 overview 已有数据，
+ * 其余页签按需加载：切到某个页签才发它的请求。
+ * 打开一张表就发两个请求，在远端仓库上会让页面明显变慢。
  */
 
 const route = useRoute()
@@ -450,7 +518,10 @@ const prefix = computed(() => route.params.prefix)
 const database = computed(() => route.params.database)
 const table = computed(() => route.params.table)
 
-const tab = ref('schema')
+const tab = ref('details')
+
+/** 不需要额外请求的页签：切过去不触发 load。 */
+const SELF_CONTAINED_TABS = new Set(['details', 'schema', 'changes', 'access'])
 
 const overview = useResource(async () => {
   const [detail, snapshot] = await Promise.all([
@@ -489,6 +560,7 @@ function onTabChange(name) {
   if (name === 'tags') tags.load()
   if (name === 'branches') branches.load()
   if (name === 'partitions') partitions.load()
+  if (name === 'grants') loadGrants()
 }
 
 function reloadAll() {
@@ -500,7 +572,7 @@ function reloadAll() {
 watch([prefix, database, table], () => {
   loadedTabs.clear()
   overview.load()
-  if (tab.value !== 'schema' && tab.value !== 'changes' && tab.value !== 'access') {
+  if (!SELF_CONTAINED_TABS.has(tab.value)) {
     loadedTabs.add(tab.value)
     onTabChange(tab.value)
   }
@@ -870,6 +942,101 @@ async function fetchAuth() {
   }
 }
 
+// ------------------------------------------------------------------ 权限
+
+/**
+ * 表级授权。管理规格把授权挂在 catalog role 上，没有「按资源反查授权」的端点，
+ * 所以列表是把全部角色的授权拉回来后在控制台侧过滤——角色数量通常不大，这个 N+1 可以接受。
+ */
+const grantsState = reactive({ loading: false, loaded: false, roles: [], rows: [], error: '' })
+
+const grantRoles = computed(() => grantsState.roles)
+
+/** meta 接口按资源层级下发可授予的权限；meta 不可用时退化到常用集合。 */
+const FALLBACK_TABLE_PRIVILEGES = [
+  'CATALOG_MANAGE_ACCESS',
+  'TABLE_DROP',
+  'TABLE_LIST',
+  'TABLE_READ_PROPERTIES',
+  'TABLE_WRITE_PROPERTIES',
+  'TABLE_READ_DATA',
+  'TABLE_WRITE_DATA',
+  'TABLE_FULL_METADATA',
+]
+
+const tablePrivileges = computed(() => {
+  const map = session.state.meta?.enums?.privilegesByGrantType || {}
+  return map.table || FALLBACK_TABLE_PRIVILEGES
+})
+
+async function loadGrants() {
+  grantsState.loading = true
+  grantsState.error = ''
+  try {
+    const { roles } = await managementApi.listCatalogRoles(prefix.value)
+    const names = (roles || []).map((role) => role.name)
+    grantsState.roles = names
+    const rows = []
+    for (const name of names) {
+      const payload = await managementApi.listGrants(prefix.value, name)
+      for (const grant of payload?.grants || []) {
+        if (grant.type !== 'table') continue
+        if ((grant.namespace || []).join('.') !== database.value) continue
+        if (grant.tableName !== table.value) continue
+        rows.push({ roleName: name, privilege: grant.privilege, grant })
+      }
+    }
+    rows.sort((a, b) => a.roleName.localeCompare(b.roleName) || a.privilege.localeCompare(b.privilege))
+    grantsState.rows = rows
+    grantsState.loaded = true
+  } catch (error) {
+    grantsState.error = describeError(error)
+  } finally {
+    grantsState.loading = false
+  }
+}
+
+const grantForm = reactive({ role: '', privileges: [] })
+const grantSaving = ref(false)
+
+async function submitGrants() {
+  grantSaving.value = true
+  try {
+    for (const privilege of grantForm.privileges) {
+      await managementApi.addGrant(prefix.value, grantForm.role, {
+        type: 'table',
+        namespace: [database.value],
+        tableName: table.value,
+        privilege,
+      })
+    }
+    notifySuccess(`已授予 ${grantForm.role} ${grantForm.privileges.length} 项权限`)
+    grantForm.privileges = []
+    await loadGrants()
+  } catch (error) {
+    notifyError(error)
+  } finally {
+    grantSaving.value = false
+  }
+}
+
+async function revokeTableGrant(row) {
+  const ok = await confirmDanger({
+    title: '撤销授权',
+    target: `撤销 ${row.roleName} 在这张表上的 ${row.privilege}？`,
+    detail: '撤销后，持有该角色的主体将立即失去对应权限。撤销不存在的授权会返回 404。',
+    confirmText: '撤销',
+  })
+  if (!ok) return
+  try {
+    await managementApi.revokeGrant(prefix.value, row.roleName, row.grant)
+    notifySuccess(`已撤销 ${row.roleName} 的 ${row.privilege}`)
+    await loadGrants()
+  } catch (error) {
+    notifyError(error)
+  }
+}
+
 // ------------------------------------------------------------------ 删表
 
 async function confirmDrop() {
@@ -913,10 +1080,30 @@ async function confirmDrop() {
 }
 
 .pc-schema-meta {
+  margin-top: 16px;
+}
+
+.pc-detail-grid {
   display: grid;
   grid-template-columns: minmax(260px, 1fr) minmax(280px, 1fr);
   gap: 16px;
   margin-top: 16px;
+}
+
+.pc-tg-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.pc-tg-role {
+  width: 220px;
+}
+
+.pc-tg-priv {
+  width: 380px;
 }
 
 .pc-change-form {
@@ -991,7 +1178,7 @@ async function confirmDrop() {
 
 @media (max-width: 1080px) {
   .pc-access,
-  .pc-schema-meta {
+  .pc-detail-grid {
     grid-template-columns: 1fr;
   }
 }

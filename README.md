@@ -911,7 +911,7 @@ http://localhost:8080/console/
 | `/auth/callback` | SSO 回调 | 校验 `state` → 授权码换令牌 → 服务端确认 → 回跳 |
 | `/` | 控制台概览 | 统计块、服务端配置、**连接自检**、catalog 清单、`/v1/config` |
 | `/browse` | 目录浏览 | 库/表/视图/函数/语义视图；建库建表、注册表、按表 ID 定位、重命名、删除 |
-| `/tables/:prefix/:database/:table` | 表详情 | Schema / 变更 / 快照 / 标签 / 分支 / 分区 / 数据访问；快照与标签**回滚** |
+| `/tables/:prefix/:database/:table` | 表详情 | 详细信息 / Schema / 变更 / 快照 / 标签 / 分支 / 分区 / 权限 / 数据访问；快照与标签**回滚**，权限页签可增删表级 grants |
 | `/catalogs` `/principals` `/principal-roles` `/catalog-roles` | 治理 | catalog、主体、服务角色、catalog 角色与 grants 的完整增删改查 |
 | `/settings` | 连接设置 | API 基址、访问令牌、登录状态、主题 |
 
