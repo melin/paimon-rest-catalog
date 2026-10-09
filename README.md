@@ -53,7 +53,7 @@ Maven 坐标与包名：`groupId` 为 `io.github.melin`，三个 artifact 分别
 这个全限定名就是要填进 `spark.sql.extensions` 的值，改动它等于破坏所有既有部署，
 因此与 groupId 一起固定下来。
 
-`docs/` 里七份文档的分工：
+`docs/` 里九份文档的分工：
 
 | 文档 | 读它的时机 |
 | --- | --- |
@@ -63,6 +63,7 @@ Maven 坐标与包名：`groupId` 为 `io.github.melin`，三个 artifact 分别
 | [`spark-paimon-rest-e2e.md`](docs/spark-paimon-rest-e2e.md) | 要让 Spark 通过本服务端建 Paimon 表——连接配置、可执行的 SQL、报错对照表 |
 | [`authorization.md`](docs/authorization.md) | 要理解权限怎么判——实体链、授权映射、失败关闭的取舍 |
 | [`console.md`](docs/console.md) | 要改 Web 控制台或排查「页面空列表」——前端分层、端点契约表、机械校验 |
+| [`console-table-detail.md`](docs/console-table-detail.md) | 要改表详情页——九个页签的数据来源、权限页签的授权模型、破坏性操作与边界 |
 | [`console-auth.md`](docs/console-auth.md) | 要给浏览器访问控制台配登录——三种登录方式、两个开关的边界、令牌与认证链、安全考量 |
 | [`polaris-capabilities-and-design.md`](docs/polaris-capabilities-and-design.md) | 要对比 Polaris 或看整体设计——核心能力提取、映射关系、已知缺口 |
 
@@ -169,8 +170,10 @@ Management API（catalog、主体、服务角色、catalog 角色与 grants）�
 控制台**默认就要求登录**（`paimon.rest.auth.console.required=true`），
 默认账号密码 `admin/admin` —— 装好即可进入，不需要先建主体。
 登录方式有三种可同时启用（用户名密码 / 主体凭据 / 外部 IdP 的 SSO），
-也可以直接在「连接设置」里填静态令牌。完整说明见
-[`docs/console.md`](docs/console.md)、[`docs/console-auth.md`](docs/console-auth.md) 与第 12 节。
+也可以直接在「连接设置」里填静态令牌。完整说明见第 12 节与
+[`docs/console.md`](docs/console.md)（控制台总览）、
+[`docs/console-table-detail.md`](docs/console-table-detail.md)（表详情页）、
+[`docs/console-auth.md`](docs/console-auth.md)（登录与鉴权）。
 
 > **这层门禁只挡住界面。** 默认 `paimon.rest.auth.enabled=false`，
 > 因此 `curl /v1/config` 与管理 API 仍然匿名可调。要保护数据必须把 `auth.enabled`
@@ -896,126 +899,49 @@ SQL 与报错对照见 [`spark-paimon-rest-e2e.md`](docs/spark-paimon-rest-e2e.m
 
 ## 12. Web 管理控制台
 
-服务端自带一个 Vue 单页应用，挂在 `/console/` 下，覆盖 Catalog API 与 Management API
-两个面。完整说明见 [`docs/console.md`](docs/console.md)。
+服务端自带一个 Vue 单页应用，挂在 `/console/` 下，覆盖 Catalog API 与 Management API 两个面：
 
 ```
 http://localhost:8080/console/
 ```
 
-### 12.1 页面
+| 路由 | 页面 |
+| --- | --- |
+| `/login`、`/auth/callback` | 登录与 SSO 回调 |
+| `/` | 概览：统计块、服务端配置、**连接自检**、catalog 清单、`GET /v1/config` |
+| `/browse` | 目录浏览：库/表/视图/函数/语义视图；建库建表、注册表、按表 ID 定位、重命名、删除 |
+| `/tables/:prefix/:database/:table` | [表详情](docs/console-table-detail.md)：九个页签、快照与标签回滚、表级 grants |
+| `/catalogs`、`/principals`、`/principal-roles`、`/catalog-roles` | 治理：catalog、主体、服务角色、catalog 角色与 grants |
+| `/settings` | 连接设置：API 基址、访问令牌、登录状态、主题 |
 
-| 路由 | 页面 | 覆盖 |
-| --- | --- | --- |
-| `/login` | 登录 | 服务端下发认证方式，页签切换：主体凭据 / SSO（OIDC）/ 静态令牌 |
-| `/auth/callback` | SSO 回调 | 校验 `state` → 授权码换令牌 → 服务端确认 → 回跳 |
-| `/` | 控制台概览 | 统计块、服务端配置、**连接自检**、catalog 清单、`/v1/config` |
-| `/browse` | 目录浏览 | 库/表/视图/函数/语义视图；建库建表、注册表、按表 ID 定位、重命名、删除 |
-| `/tables/:prefix/:database/:table` | 表详情 | 详细信息 / Schema / 变更 / 快照 / 标签 / 分支 / 分区 / 权限 / 数据访问；快照与标签**回滚**，权限页签可增删表级 grants |
-| `/catalogs` `/principals` `/principal-roles` `/catalog-roles` | 治理 | catalog、主体、服务角色、catalog 角色与 grants 的完整增删改查 |
-| `/settings` | 连接设置 | API 基址、访问令牌、登录状态、主题 |
+三条约束值得先知道：
 
-首页的「连接自检」是排查主力：控制台最常见的故障是地址或令牌配错，
-而表现是「每个页面都是空列表」；它逐个探测依赖的端点，把失败的那一个
-连同 HTTP 状态与错误消息列出来，一眼能分辨是服务端没起来、令牌不对，还是路径写错。
+- **它是运维工具，不是写入入口。** 不提供 `commitTable`（控制台拼不出一个指向真实文件的快照）；
+  对表的改动只有结构变更、回滚与授权。
+- **构建产物提交在仓库里。** 产物落在 `paimon-rest-server/src/main/resources/static/console`，
+  因此 `./mvnw package` 与 Dockerfile 都不需要 Node；代价是改了前端必须重建并提交产物，
+  用 `./scripts/build-console.sh` 一条命令完成构建与校验。
+- **路径不靠人工比对。** 全部端点收在 `paimon-rest-console/src/api/endpoints.js` 一张表里，
+  由 `scripts/verify-console.py` 与两份 OpenAPI 规格机械比对（10 组 21 项：端点存在性、
+  引用完整性、五处基址一致、产物新鲜度、请求体形状、对话框状态、下拉候选来源）；
+  服务端侧 `ConsoleApiTests` 守住静态资源托管与 SPA 深链回退。
 
-### 12.2 它是运维工具，不是写入入口
+### 12.1 登录与鉴权
 
-**不提供 `commitTable`**（`.../tables/{table}/commit`）。那是写入方（Spark / Flink 的 writer）
-提交快照的接口，请求体里要带 manifest list 等由写入方在本地生成的文件路径——
-控制台拼不出一个真实的快照，提供一个这样的表单只会让人提交出一张指向不存在文件的表。
-相比之下 `rollbackTable` 被实现了：它以**已存在的** instant（快照 ID 或标签名）为目标，
-控制台可以从列表里选。控制台对快照的介入只做「读」与「回滚」。
+两个开关管两件不同的事：`paimon.rest.auth.console.required`（默认 `true`）只作用于控制台界面
+与 `/api/console/v1/**`；`paimon.rest.auth.enabled`（默认 `false`）管 `/v1/**`、
+`/api/catalog/v1/**`、`/api/management/v1/**` 是否要带令牌。
 
-### 12.3 构建：npm 不在 Java 构建路径上
+**默认部署是「要求登录但数据面敞开」**：浏览器被拦在登录页，而 `curl /v1/config` 返回 200。
+这层门禁只避免「误入的人看到一堆管理表单」，**不是安全边界**——要保护数据必须开 `auth.enabled`。
+浏览器登录支持用户名密码（默认 `admin/admin`，不需要先建主体）、OAuth 客户端凭据、
+OIDC 授权码 + PKCE 三种方式；令牌是自包含 JWT，多实例互认但**无法即时撤销**。
+完整设计见 [`docs/console-auth.md`](docs/console-auth.md)，三层测试（31 / 63 / 59）用法见第 10 节。
 
-控制台的构建产物**提交在仓库里**（`paimon-rest-server/src/main/resources/static/console`），
-`vite.config.js` 的 `outDir` 直接指向那里。因此：
+### 12.2 文档
 
-- `./mvnw package` 与 Dockerfile 都能产出带控制台的可运行包，**不需要 Node**；
-- 代价是改了控制台源码必须重新构建并提交产物，否则打包出来的是上一版。
-
-```bash
-./scripts/build-console.sh          # 装依赖（按需）→ 构建 → 校验
-FRESH=1 ./scripts/build-console.sh  # 强制重新 npm ci
-```
-
-一个容易踩的坑：控制台产物按内容哈希命名，每次重建文件名都会变，而
-`maven-resources-plugin` 从不删除 `target` 里已不存在于 `src` 的文件——
-增量 `mvn package` 会把历次构建的旧产物一起打进 jar（实测一次多出 20 个死文件）。
-服务端 POM 因此把 `maven-clean-plugin` 的一个执行绑到 `initialize`，
-每次构建前清掉 `target/classes/static/console`。Dockerfile 走 `clean package`，
-本来就不受影响。
-
-### 12.4 校验：82 条端点不靠人工比对
-
-控制台用字符串拼 URL，而服务端路径属于契约（`spec/` 下的两份 OpenAPI 规格）。
-路径写错时前端只表现为「404 空列表」，看不出是前端拼错还是服务端改名。
-因此全部路径收在 `paimon-rest-console/src/api/endpoints.js` 一张表里，
-交给 `scripts/verify-console.py` 与规格机械比对——9 组 20 项，
-覆盖端点存在性、扩展白名单、引用完整性、无死条目、五处基址一致（外加**令牌端点路径
-与服务端下发的 `tokenEndpoint` 是否一致**）、产物完整、**产物是否比源码旧**、
-**表结构变更的请求体形状是否与规格的 `SchemaChange` 一致**，以及对话框是否声明
-`destroy-on-close`。产物新鲜度那条最实用：产物过期不会让任何东西报错，
-它只是安静地少一个按钮；请求体形状那条针对控制台里最难自查的一类错误——
-形状写错时服务端只回一句笼统的 400。
-
-`ConsoleApiTests`（12 个用例）在 `mvnw test` 里从服务端侧守住同一件事：
-重定向、目录式路径转发、深链回退、缺失 assets 仍 404、登录引导的两个字段、
-门禁的生效范围，以及已提交入口页引用的产物是否都存在。
-
-### 12.5 登录与鉴权
-
-有两个开关，管的是两件不同的事：
-
-| 配置项 | 默认 | 管什么 |
-| --- | --- | --- |
-| `paimon.rest.auth.console.required` | `true` | 浏览器进控制台是否要先登录；只作用于控制台界面与 `/api/console/v1/**` |
-| `paimon.rest.auth.enabled` | `false` | `/v1/**`、`/api/catalog/v1/**`、`/api/management/v1/**` 是否要带令牌 |
-
-**默认部署因此是「要求登录但数据面敞开」**：浏览器被拦在登录页，
-而 `curl /v1/config` 返回 200。这层门禁只解决「误入的人看到一堆管理表单」，
-**不是安全边界**——要保护数据必须开 `auth.enabled`。服务端在
-「门禁开着而鉴权关着」时会在启动日志里告警，登录页与设置页也都写明了这一点。
-
-`auth.enabled=true` 后，上述前缀全部要求 `Authorization: Bearer <token>`。
-**豁免只有三条精确路径**：`GET /api/console/v1/auth`（登录引导）、
-`POST /api/console/v1/login`（用户名密码换令牌）与
-`POST /api/catalog/v1/oauth/tokens`（客户端凭据换令牌）——它们要回答的正是「怎么登录」，
-放在鉴权之后会形成死循环。`/console/**` 的静态资源不在鉴权范围
-（浏览器无法在文档请求上带 `Authorization` 头），真正的边界在 API 上。
-
-浏览器登录**三种方式**，可同时启用：
-
-| 方式 | 凭据 | 令牌由谁签发 | 默认 |
-| --- | --- | --- | --- |
-| 用户名 + 密码 | 服务端配置里的账号，默认 `admin/admin` | 本服务端（HS256） | **开启** |
-| OAuth 2.0 客户端凭据 | 主体 `clientId` / `clientSecret` | 本服务端（HS256） | 开启 |
-| OIDC 授权码 + PKCE | 外部 IdP（Keycloak / Auth0 / Okta…） | IdP（RS256 / ES256） | 关闭 |
-
-用户名密码排在登录页第一个页签——**它不需要先建主体**，是「装好就能进」的那条路；
-后两种对标 Polaris Console。令牌端点的路径与 Polaris 一致
-（`/api/catalog/v1/oauth/tokens`），响应与错误字段用 RFC 6749 的 snake_case，
-因此通用 OAuth 客户端与 Polaris 官方 console 都能直接对接；
-用户名密码那条是本工程自己的扩展端点（JSON 进 JSON 出），刻意不做成 OAuth 形状。
-第四个入口是 `paimon.rest.auth.tokens` 里的静态令牌（给机器用，登录页排最后）。
-
-**控制台账号不是主体。** 它只决定「谁能打开控制台」，进来之后能做什么仍由主体角色决定；
-默认两者同名，可用 `console.password.principals` 映射成不同的名字。
-启动日志会对「配了账号但控制台不要求登录」「还在用默认密码」「账号在授权链路里查不到」
-三种情况分别告警。
-
-**令牌是自包含的 JWT，服务端不保存会话。** 因此多实例互认、重启不掉线；
-代价是**无法即时撤销**——登出只是忘掉本机令牌，要立刻失效只能轮换签名密钥
-（会作废所有人的令牌），暴露窗口由 `access-token.ttl`（默认 1 小时）兜住。
-
-完整设计（时序、错误码表、安全考量、已知边界）见
-[`docs/console-auth.md`](docs/console-auth.md)。
-
-登录链路横跨三层，测试也分三层——`ConsoleAuthEndpointTests`（31 个用例，在 `mvnw test` 里、
-连内存 H2）守住错误码与接线，`scripts/sweep-console-auth.sh`（63 项，真实 HTTP）守住协议层
-的实际报文，`npm run check:login`（59 项，跑前端真实代码）守住**前端发出的请求形状与登录态
-流转**这一服务端看不见的面。三者都要对着一个**开了鉴权**的实例；用法见第 10 节。
-
-控制台用的另一个扩展端点 `/api/console/v1/meta` 导出枚举取值与服务端配置摘要，
-让表单的下拉框不硬编码，且只暴露枚举与服务端自身配置，不含任何主体、catalog 或凭据。
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/console.md`](docs/console.md) | 控制台总览：目录结构、服务端如何托管、页面清单、端点契约表与机械校验、构建与提交约定、测试分层 |
+| [`docs/console-table-detail.md`](docs/console-table-detail.md) | 表详情页：九个页签逐个说明、权限页签的授权模型与 N+1 取舍、破坏性操作、已知边界 |
+| [`docs/console-auth.md`](docs/console-auth.md) | 登录与鉴权：两个开关的边界、三种登录方式与令牌端点、错误码、安全考量、已知边界 |

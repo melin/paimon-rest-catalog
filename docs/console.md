@@ -135,7 +135,7 @@ paimon-rest-console/
 | `/auth/callback` | SSO 回调 | 校验 `state` → 用授权码换令牌 → 让服务端确认 → 回跳原页面。不套管理布局 |
 | `/` | 控制台概览 | 统计块、服务端配置摘要、**连接自检**、catalog 清单、`GET /v1/config` 展示 |
 | `/browse` | 目录浏览 | 左库右对象；四页签（表/视图/函数/语义视图）；建库、建表、注册表、按表 ID 定位、重命名、删除、详情抽屉 |
-| `/tables/:prefix/:database/:table` | 表详情 | 七页签：Schema / 变更 / 快照 / 标签 / 分支 / 分区 / 数据访问；含**变更构造器**与快照、标签的**回滚** |
+| `/tables/:prefix/:database/:table` | [表详情](console-table-detail.md) | 九页签：详细信息 / Schema / 变更 / 快照 / 标签 / 分支 / 分区 / 权限 / 数据访问；含**变更构造器**、快照与标签的**回滚**、表级 grants 的增删 |
 | `/catalogs` | Catalog 管理 | 列出 / 创建 / 详情 / 更新（带版本）/ 删除 |
 | `/principals` | 主体 | 列出 / 创建 / 更新 / 删除 / rotate / reset；授予与撤销服务角色 |
 | `/principal-roles` | 服务角色 | 列出 / 创建 / 更新 / 删除；查看成员；授予与撤销 catalog 角色 |
@@ -203,7 +203,7 @@ python3 scripts/verify-console.py      # 退出码 0 通过 / 1 不一致 / 2 �
 PYTHON=/path/to/python3 scripts/verify-console.py   # 多解释器时指定装了 PyYAML 的那个
 ```
 
-它**不构建前端、不启动服务端**，只做静态比对，因此可以放进提交前的检查。9 组 20 项：
+它**不构建前端、不启动服务端**，只做静态比对，因此可以放进提交前的检查。10 组 21 项：
 
 | 组 | 校验内容 |
 | --- | --- |
@@ -216,6 +216,7 @@ PYTHON=/path/to/python3 scripts/verify-console.py   # 多解释器时指定装�
 | 7. 产物新鲜 | 构建产物不比控制台源码旧（改了源码没重新构建会在这里暴露） |
 | 8. 变更构造器 | 表详情的变更构造器能提交的动作都在规格的 `SchemaChange` 里，且每个动作提交的字段都在该动作的 schema 里有定义 |
 | 9. 对话框状态 | 每个 `el-dialog` 都声明了 `destroy-on-close`（否则编辑时会残留上一次的状态） |
+| 10. 下拉候选来源 | 每个 `el-select` 都声明了候选来源（`el-option` / `:options` 等）；确属自由输入的要在源码里写 `el-select-free-input` 标记显式豁免（否则「下拉是空的」这类 bug 只有打开页面才看得到） |
 
 第 7 组是这套机制里最实用的一条：**产物过期不会让任何东西报错**，
 它只是安静地少一个按钮。
