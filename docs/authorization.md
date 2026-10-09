@@ -191,7 +191,7 @@ catalog 存在但主体无权时仍返回 403。
 | `paimon.rest.auth.enabled` | `false` | 是否要求 `Authorization: Bearer <token>` |
 | `paimon.rest.auth.principal` | `anonymous` | 认证关闭或未带令牌时使用的主体名 |
 | `paimon.rest.auth.tokens` | 空 | 允许的静态令牌列表 |
-| `paimon.rest.auth.token-principals` | 空 | 静态令牌 → 主体名映射；未登记的令牌退化为「令牌即主体名」 |
+| `paimon.rest.auth.token-principals` | 空 | 静态令牌 → 主体名映射；未登记的令牌退化为「令牌即主体名」（审计列超长的记摘要，见 §6 第 8 条） |
 | `paimon.rest.auth.access-token.ttl` | `1h` | 控制台签发的访问令牌有效期 |
 | `paimon.rest.auth.access-token.issuer` | `paimon-rest` | 访问令牌的 `iss` |
 | `paimon.rest.auth.access-token.signing-key` | 空 | HS256 签名密钥（Base64，≥32 字节）；留空则每次启动随机生成 |
@@ -287,5 +287,11 @@ curl -s -X POST -H "Authorization: Bearer etl-token" -H "$J" \
 6. **授权不校验被授权对象是否存在。** 可以对尚未创建的表授予 `TABLE_READ_DATA`，授权记录先于
    对象存在是允许的（这也是先建授权再把表接管的正常顺序）。
 7. **无权限缓存。** 每次请求按主体查授权链路，权限变更即时生效，代价是热点路径上的若干次查询。
+8. **审计列里超过 255 字符的主体名记的是摘要。** 授权判定用的是原始主体名（长度不限），
+   落库到 `owner` / `created_by` / `updated_by` 时才归一化：放得下的原样存，
+   放不下的记 `sha256:<前 12 位>`。这条边界的起因是「认不出的令牌会退化为令牌即主体名」，
+   而控制台访问令牌长 272 个字符，直接入库会让写入以
+   `Data too long for column 'created_by'` 失败。配 `token-principals`
+   把令牌映射成真正的名字才是正解，见 [`console-auth.md`](console-auth.md)。
 8. **语义模型授权的延迟语义未实现。** 文档标注为 deferred 的源表 / 视图权限校验与读时传播
    检查不在本层表达。

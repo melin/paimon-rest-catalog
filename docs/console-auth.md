@@ -637,6 +637,20 @@ curl -s -X POST http://localhost:8080/api/management/v1/principals \
 - **`scope` 只有 `PRINCIPAL_ROLE:ALL`。** 见 [§5.3](#53-scope-只接受-principal_roleall)。
 - **`token-principals` 与 `password.principals` 都是静态配置。** 令牌 / 账号 → 主体名的
   映射写在配置文件里，改映射要重启。
+- **主体名超过 255 字符时，审计列里记的是摘要。** 认出令牌要靠配置或签名，认不出时
+  退化为「令牌即主体名」（门禁模式下尤其常见：令牌可能来自另一个实例，重启后签名密钥
+  变了就认不出来）。而访问令牌有 272 个字符，长于审计列 `varchar(255)`，
+  直接入库会以 `Data too long for column 'created_by'` 报 500。因此写入前归一化为
+  `sha256:<前 12 位>`——同一个令牌得到同一个标签，可追溯，且不把凭据片段写进元数据库。
+  正确的解法始终是配 `token-principals`，让审计里出现的是人名。见
+  [`../README.md`](../README.md) 第 9 节第 19 条。
+- **同一个问题也不靠「加宽审计列」来解决。** 把这三列加宽到 `varchar(512)` 挡得住控制台
+  令牌（272 字符），换来的却是更糟的结果：这三列是被接口原样返回的（`TableDtos` /
+  `DatabaseDtos` / `ViewDtos` / `FunctionDtos` / `PartitionDtos`），加宽后令牌**明文入库且
+  可以读回来**——读得到表元数据的人就拿到了一个可用的令牌（签名密钥配置好时还跨实例有效），
+  而原先的 500 至少只意味着「没写进去」。何况主体名长度没有上界，512 挡不住 OIDC 的
+  ID token（通常数百到一千多字符），溢出只是被推后。代价上也不划算：MySQL profile 的
+  `ddl-auto` 是 `validate`，改列宽要对 14 张表共 42 个列做迁移，而归一化方案对数据库零变更。
 - **控制台不解析 JWT。** 前端拿到的令牌里有什么 claim 一概不看，`exp` 也不看
   （只在「剩余有效期」提示上用一个由服务端返回的 `expiresAtMillis`）。
   前端解出来的 `exp` 只能骗自己，签名、受众、签发者都验不了。

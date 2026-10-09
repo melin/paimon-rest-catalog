@@ -107,7 +107,7 @@ mysql -h 127.0.0.1 -u root -p < sql/schema-mysql.sql
 # 全量构建
 JAVA_HOME=/path/to/jdk-21 ./mvnw -DskipTests install
 
-# 运行全部测试（服务端 209 + Spark 76，共 285 个用例）
+# 运行全部测试（服务端 224 + Spark 76，共 300 个用例）
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
 
 # 启动服务端（默认 8080 端口，连 MySQL，预置 catalog prefix=paimon 与 database=default）
@@ -487,7 +487,7 @@ Catalog 侧与鉴权：
 | `paimon.rest.auth.enabled` | `false` | 是否要求数据接口带 Bearer 令牌（`/v1/**`、`/api/catalog/v1/**`、`/api/management/v1/**`） |
 | `paimon.rest.auth.principal` | `anonymous` | 认证关闭或未带令牌时使用的主体名 |
 | `paimon.rest.auth.tokens` | 空 | 允许的静态令牌列表（给机器用） |
-| `paimon.rest.auth.token-principals` | 空 | 静态令牌 → 主体名映射；未登记时退化为「令牌即主体名」 |
+| `paimon.rest.auth.token-principals` | 空 | 静态令牌 → 主体名映射；未登记时退化为「令牌即主体名」（审计列放不下的长度会记摘要，见第 9 节第 19 条） |
 | `paimon.rest.auth.access-token.ttl` | `1h` | 控制台签发的访问令牌有效期（唯一能限制令牌泄露窗口的参数） |
 | `paimon.rest.auth.access-token.signing-key` | 空 | HS256 签名密钥，Base64 且解码后 ≥32 字节；**留空则每次启动随机生成**（多实例互不认、重启掉线），生产必须配 |
 | `paimon.rest.auth.console.required` | `true` | 浏览器进控制台是否必须先登录。**只作用于控制台界面与 `/api/console/v1/**`，不是安全边界** |
@@ -605,7 +605,9 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
    该变更只支持基本类型列。
 4. **`drop database` 级联删除**。规格的删除接口没有 cascade 参数，这里按级联实现：
    先清理库内的表（含分区、消费者）、视图、函数、语义视图，再删除 database。
-5. **表重命名不改数据位置**。只更新目录中的名称与所属 database，与 Paimon 服务端一致。
+5. **表重命名不改数据位置**。只更新目录中的名称与所属 database，与 Paimon 服务端一致；
+   因此磁盘上的目录名不会跟着变。目标名已被占用时返回 409——「改成与原名相同」也走这条，
+   控制台在本地拦下并当作无操作（否则点一下确定就会收到一句莫名的「表已存在」）。
 6. **`rollback-schema` 递增版本号**。回滚把历史内容写入新的 `schemaId`，而不是退回版本号，
    保证快照与 schema 的对应关系单调。
 7. **`commit` 乐观并发**。`baseSnapshotUuid` 与当前最新快照不一致时返回 `success=false`，
@@ -650,12 +652,23 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
 18. **存储配置的跨类型字段被静默忽略**。`storageType` 为 `FILE` 却带 `roleArn` 的请求
     不会报 400，而是丢掉该字段——全站都依赖 Spring 默认的宽松绑定，为存储配置单独收紧
     会造成「只有这个接口严格」的不一致。代价是拼错的字段名不会被发现。
+19. **审计列存的是主体名，超过 255 字符时记摘要**。`owner` / `created_by` / `updated_by`
+    是 `varchar(255)`，而主体名的长度没有上界：认证链认不出令牌时会退化为「令牌即主体名」，
+    控制台签发的访问令牌就有 272 个字符，于是写入以
+    `Data too long for column 'created_by'` 失败——现象是「建表/建库报 500」，
+    从错误信息里看不出与认证有关。因此落库前统一在 `AuditedEntity` 归一化
+    （`AuditPrincipal.of`）：放得下的原样存，放不下的记 `sha256:<前 12 位>`。
+    **不截断**：截断会把凭据的前 255 个字符原样写进元数据库，而元数据是能被列表接口读出来的。
+    超长时启动日志会告警一次，给出的解法是配 `paimon.rest.auth.token-principals`
+    把令牌映射成真正的名字。授权判定读的是未归一化的主体名，两者互不影响。
+    **刻意不通过加宽这三列来解决**：它们会被接口原样返回，加宽等于让凭据明文入库并可被读回；
+    且主体名长度没有上界，加宽只是把溢出推后，还要对 14 张表共 42 个列做迁移。
 
 ---
 
 ## 10. 测试
 
-### 单元与集成测试（285 个用例）
+### 单元与集成测试（300 个用例）
 
 ```bash
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
@@ -664,11 +677,11 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 测试连的是内存 H2（`test` profile，见 `src/test/resources/application-test.yml`），
 **不依赖本机是否有 MySQL**。
 
-服务端（209 个）：
+服务端（224 个）：
 
 | 测试类 | 覆盖 |
 | --- | --- |
-| `PaimonRestCatalogApiTests` | 配置发现、建表与 schema 变更（加列 / 改名 / 改类型 / 改可空性 / 改属性）/ 回滚、快照提交与乐观并发、分区统计、视图与函数、语义视图 1 MiB 上限、消费者位点、凭证下发与 403、各类 404 的 `resourceType` |
+| `PaimonRestCatalogApiTests` | 配置发现、建表与 schema 变更（加列 / 列改名 / 改类型 / 改可空性 / 改属性）/ 回滚、快照提交与乐观并发、分区统计、表重命名（改名不动数据位置、跨库重命名、目标名被占用 409）、视图与函数、语义视图 1 MiB 上限、消费者位点、凭证下发与 403、各类 404 的 `resourceType` |
 | `ManagementApiTests` | 管理 API 的主体、角色、装配与授权链路 |
 | `StorageConfigApiTests` | `storageConfigInfo` 六种存储类型的建 / 读 / 改往返、`AZURE` 缺 `tenantId` 与空位置的 400、换存储后新库位置随之改变、OBS↔OSS 换类型时端点一起替换 |
 | `StorageConfigDtosTests` | 判别联合的绑定位形：子类型注册名与枚举一致、判别字段只出现一次、跨类型字段不串、落库路径（`Json`）往返 |
@@ -684,6 +697,8 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 | `JwksTests` | JWKS 解析：RSA 与 EC 可用性（实测验签）、混合类型、不可用键跳过而非整份失败、私钥材料忽略、无 `kid` 与重复 `kid`、畸形文档 |
 | `OidcServiceTests` | 用 JDK `HttpServer` 起假 IdP：发现文档与 JWKS 的缓存与刷新、**未知 `kid` 强制重取**、刷新失败沿用旧值、换钥、`audience`、时钟偏移、发现文档 issuer 不符则拒绝、IdP 不可达时不影响已缓存的验证 |
 | `LoginAttemptLimiterTests` | 失败限速：阈值、窗口重置、桶相互独立、关闭、桶数上限与过期清理 |
+| `AuditPrincipalTests` | 审计主体名归一化的单元行为：短名原样、空值记 `anonymous`、恰好 255 字符仍原样、超长记 `sha256:<前 12 位>`（确定性、幂等、**结果里不含原文任何片段**，也**不是截断**），以及实体基类写 `owner` / `createdBy` / `updatedBy` 时一定不超列宽 |
+| `AuditPrincipalEndpointTests` | 审计主体名走完整 HTTP 链路（拦截器 → 主体名 → 实体 → JDBC）：门禁模式下 272 字符的未知令牌**不再把建表打成 500** 而是记摘要、`Bearer alice` 仍以 `alice` 入库（本地调试约定不退）、服务端自己签发的令牌解析出真实主体名、匿名记 `anonymous` |
 | `MysqlDdlGeneratorTests` | 由实体元数据生成 MySQL DDL，并断言方言被钉在 MySQL 8.0（见「代码生成」） |
 | `PaimonRestServerApplicationTests` | 上下文加载 |
 

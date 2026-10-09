@@ -515,6 +515,64 @@ class PaimonRestCatalogApiTests {
         assertFalse(databaseService.list(PREFIX, null, null).databases().contains(database));
     }
 
+    /**
+     * 表重命名只改目录里的名称，不动数据位置（README 第 9 节第 5 条，与 Paimon 服务端一致）。
+     *
+     * <p>控制台的「重命名」按钮走的就是这条路，因此这里把它依赖的性质全部钉住：
+     * 新名字可读、旧名字消失、{@code id} 与 {@code path} 不变（不是建了新表，也没搬动数据）。
+     */
+    @Test
+    void renamingATableChangesTheNameButNotTheDataLocation() {
+        String database = "it_rename";
+        createDatabase(database);
+        tableService.create(PREFIX, database, new TableDtos.CreateTableRequest(
+                new CommonDtos.Identifier(database, "before"), ordersSchema()));
+        TableDtos.GetTableResponse before = tableService.get(PREFIX, database, "before");
+        assertTrue(before.path().endsWith("before"), "表路径应包含表名: " + before.path());
+
+        tableService.rename(PREFIX, new TableDtos.RenameTableRequest(
+                new CommonDtos.Identifier(database, "before"),
+                new CommonDtos.Identifier(database, "after")));
+
+        TableDtos.GetTableResponse after = tableService.get(PREFIX, database, "after");
+        assertEquals("after", after.name());
+        assertEquals(before.id(), after.id(), "重命名是改名字，不是建新表");
+        assertEquals(before.path(), after.path(), "重命名不该搬动数据");
+        assertEquals(List.of("after"), tableService.list(PREFIX, database, null, null, null).tables());
+        assertEquals(404, assertThrows(ApiException.class,
+                () -> tableService.get(PREFIX, database, "before")).getStatus());
+
+        // 目标名被占用 -> 409。「改成与原名相同」也落在这一条上，所以控制台在本地就拦掉了，
+        // 不发这个注定失败的请求——否则用户点一下确定就收到一个「表已存在」的红报错。
+        tableService.create(PREFIX, database, new TableDtos.CreateTableRequest(
+                new CommonDtos.Identifier(database, "taken"), ordersSchema()));
+        ApiException conflict = assertThrows(ApiException.class, () -> tableService.rename(PREFIX,
+                new TableDtos.RenameTableRequest(new CommonDtos.Identifier(database, "after"),
+                        new CommonDtos.Identifier(database, "taken"))));
+        assertEquals(409, conflict.getStatus());
+        assertEquals(ResourceType.TABLE, conflict.getResourceType());
+        assertEquals("taken", conflict.getResourceName());
+        assertEquals(409, assertThrows(ApiException.class, () -> tableService.rename(PREFIX,
+                new TableDtos.RenameTableRequest(new CommonDtos.Identifier(database, "after"),
+                        new CommonDtos.Identifier(database, "after")))).getStatus());
+
+        // 源表不存在 -> 404；请求不完整 -> 400
+        assertEquals(404, assertThrows(ApiException.class, () -> tableService.rename(PREFIX,
+                new TableDtos.RenameTableRequest(new CommonDtos.Identifier(database, "ghost"),
+                        new CommonDtos.Identifier(database, "somewhere")))).getStatus());
+        assertEquals(400, assertThrows(ApiException.class,
+                () -> tableService.rename(PREFIX, null)).getStatus());
+
+        // 跨库重命名：规格允许（控制台没有暴露这个入口），数据位置同样不动
+        createDatabase("it_rename_target");
+        tableService.rename(PREFIX, new TableDtos.RenameTableRequest(
+                new CommonDtos.Identifier(database, "after"),
+                new CommonDtos.Identifier("it_rename_target", "moved")));
+        TableDtos.GetTableResponse moved = tableService.get(PREFIX, "it_rename_target", "moved");
+        assertEquals("moved", moved.name());
+        assertEquals(before.path(), moved.path(), "跨库重命名同样不搬数据");
+    }
+
     // ------------------------------------------------------------------ 辅助
 
     private void createDatabase(String name) {

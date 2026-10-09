@@ -904,11 +904,12 @@ async function confirmDropTable(name) {
 
 // ------------------------------------------------------------------ 通用重命名
 
-const renameDialog = reactive({ open: false, title: '', value: '', saving: false, apply: null })
+const renameDialog = reactive({ open: false, title: '', value: '', original: '', saving: false, apply: null })
 
 function openRenameTable(table) {
   renameDialog.title = `重命名表：${table}`
   renameDialog.value = table
+  renameDialog.original = table
   renameDialog.apply = async (next) => catalogApi.renameTable(
     prefix.value,
     { database: database.value, object: table },
@@ -920,6 +921,7 @@ function openRenameTable(table) {
 function openRenameView(view) {
   renameDialog.title = `重命名视图：${view}`
   renameDialog.value = view
+  renameDialog.original = view
   renameDialog.apply = async (next) => catalogApi.renameView(
     prefix.value,
     { database: database.value, object: view },
@@ -932,6 +934,12 @@ async function saveRename() {
   const next = renameDialog.value.trim()
   if (!next) {
     notifyError(new Error('新名称不能为空'))
+    return
+  }
+  if (next === renameDialog.original) {
+    // 名字没改：服务端会把「目标名已存在」判成 409，报出来的是一句对用户没有意义的
+    // 「表已存在」。这里直接当作无操作，不发那趟请求，也不报错。
+    renameDialog.open = false
     return
   }
   renameDialog.saving = true
