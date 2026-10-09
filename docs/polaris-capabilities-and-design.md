@@ -49,7 +49,7 @@ Paimon 的 REST Catalog 规格遵循同一范式，但对象模型不同：Polar
 | 多租户 / 多 catalog | 路径前缀 `{prefix}` 即 catalog 标识 | `CatalogEntity` + `CatalogService.resolve()`，支持未登记 prefix 自动登记 |
 | catalog 类型（internal / external） | `register` 进来的表标记 `isExternal` | `TableEntity.external` + `POST .../databases/{database}/register` |
 | 存储配置抽象 | `warehouse` + 表路径约定 | `default-warehouse` 与 `path-template` 配置项；路径按 `warehouse/database.db/table` 推导 |
-| 存储类型与凭据（S3 / Azure / GCS） | `StorageConfigInfo` 判别联合 + `polaris.storage.*` 配置 | 管理面六种 `storageType` 完整建模并落库（`StorageConfigs`），其中 `OBS` / `OSS` 为超出规格的扩展（见下）；服务端侧配置面见 `RestServerProperties.Storage`、`CredentialManager`、`FileIo`，下发规则见 `StorageCredentialManager` |
+| 存储类型与凭据（S3 / Azure / GCS） | `StorageConfigInfo` 判别联合 + `polaris.storage.*` 配置 | 管理面六种 `storageType` 完整建模并落库（`StorageConfigs`），其中 `OBS` / `OSS` 为超出规格的扩展（见下）；服务端侧配置面见 `RestServerProperties.Storage`、`CredentialManager`、`FileIo`，下发规则见 `StorageCredentialManager`。另有 catalog 自带的静态凭据（`accessKeyId` / `secretAccessKey`），同为超出规格的扩展（见下） |
 | 凭证下发 | `GET .../tables/{table}/token` | `CredentialService.token()`：按 catalog 的存储类型分派，经 `StorageCredentialCache` 复用未过期凭据并返回 `expiresAt` |
 | 查询鉴权与策略下推 | `POST .../tables/{table}/auth` | `CredentialService.auth()`：返回行过滤表达式与列脱敏映射；请求列不在 schema 中时返回 403 |
 | RBAC 细粒度权限 | 由 REST Management API 承担权限面 | 已实现：主体 → principal role → catalog role → 资源授权的完整链路，并作为 `/v1/**` 的判定依据。见第六节 |
@@ -89,12 +89,20 @@ Paimon 的 REST Catalog 规格遵循同一范式，但对象模型不同：Polar
 
 | storageType | 下发的键 | 密钥来源 |
 | --- | --- | --- |
-| `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | 具名存储 → 默认配置 → 环境凭据链 |
+| `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | catalog 静态凭据 → 具名存储 → 默认配置 → 环境凭据链 |
 | `AZURE` | `azure.tenant-id`、`azure.account`、`azure.hierarchical`、`azure.multi-tenant-app-name`、`azure.consent-url` | 仅定位元数据 |
 | `GCS` | `gcs.oauth2.token`、`gcs.oauth2.token-expires-at`、`gcs.service-account` | 服务端配置 → 环境凭据链 |
-| `OBS` | `fs.obs.access.key`、`fs.obs.secret.key`、`fs.obs.session.token`、`fs.obs.endpoint` | 具名存储 → 默认配置 → 环境凭据链 |
+| `OBS` | `fs.obs.access.key`、`fs.obs.secret.key`、`fs.obs.session.token`、`fs.obs.endpoint` | catalog 静态凭据 → 具名存储 → 默认配置 → 环境凭据链 |
 | `OSS` | `fs.oss.accessKeyId`、`fs.oss.accessKeySecret`、`fs.oss.securityToken`、`fs.oss.endpoint` | 同上 |
 | `FILE` | 自包含令牌（`accessKeyId` / `securityToken` / `expiration` / `tablePath`） | 服务端自签 |
+
+「catalog 静态凭据」这一级是本工程超出第三节规格的扩展（见第 5 点），它**优先于其余全部来源**：
+catalog 自带 `accessKeyId` / `secretAccessKey` 时，具名存储与默认配置都不再看。
+它与 `stsUnavailable` 还是**正交**的两件事——后者说的是「服务端不去向云申请临时凭据」，
+而静态凭据是「下发用户自己填进来的长期密钥」，因此 `stsUnavailable: true` 下照常下发。
+这一点决定了它的适用场景：不提供 STS 的兼容 S3 存储（MinIO、Ceph RGW、Ozone、FlashBlade 等）
+按 Polaris 的路径接入时只能写 `stsUnavailable: true` 并让引擎自己找凭据，
+静态凭据补上的正是这一格。
 
 选定的实现由 `paimon.rest.credential-manager.type` 决定：`default` 走上面的分派，
 `noop` 不下发（读表接口返回 501）。策略在 `StorageRuntimePolicy` 里于启动期解析，
@@ -126,15 +134,54 @@ Azure 账户密钥，它靠服务进程自身的 Azure 标识签 SAS，本工程
 `OBS` / `OSS` 同理：服务端只代持配置里的 AK/SK（或成套的临时凭据），
 不代为向华为云 / 阿里云申请 STS 令牌。
 接入真实临时凭据时应替换 `DefaultStorageCredentialManager` 的对应分支，这是本实现预留的外部集成点。
+上面这几种来源都要求**密钥写进服务端配置**；Polaris 那侧也一样
+（`polaris.storage.aws.access-key` / 具名存储），因此「同一套服务端配置打给多个 catalog
+却要用不同密钥」在两边都做不到。本工程为此另加了一处扩展，见下一节。
 
-### 4. 元数据模型按「当前值 + 历史版本」组织
+### 5. catalog 静态凭据也是超出规格的扩展
+
+Polaris 规格的 `AwsStorageConfigInfo` 里**没有** per-catalog 的 `accessKeyId` / `secretAccessKey`，
+密钥只来自服务端配置或具名存储：`stsUnavailable: true` 的含义是「不去申请临时凭据」，
+它没有顺手留一个「那就用我填的这对长期密钥」的入口。于是接入不提供 STS 的兼容 S3 存储时，
+密钥只能落在服务端侧，而服务端配置是**全局**的——多租户下无法给每个 catalog 一把独立的钥匙。
+
+本工程在 `S3` / `OBS` / `OSS` 三种 `storageConfigInfo` 上各加两个字段补上这个缺口：
+
+| 字段 | 读写 | 说明 |
+| --- | --- | --- |
+| `accessKeyId` | 可读可写 | 不是秘密；回显它是为了让控制台显示「配的是哪把钥匙」，也是判断「有没有配凭据」的依据 |
+| `secretAccessKey` | **只写不读** | 落库前加密，任何响应都不回显 |
+
+几个刻意的取舍：
+
+- **`secretAccessKey` 只写不读**，因此 `PUT` 省略它表示**保持原值**而不是清空——
+  这是规格 `PUT`「整体替换」语义的唯一例外。不这样处理的话，改一次 `endpoint`
+  就得重新贴一遍密钥，而密钥本该是一次性输入的东西。
+  要清除则显式提交一对空串（控制台表单里有对应按钮）。
+- **加密落库，fail-closed。** 用 AES-GCM（AES-256）加密后写进
+  `storageConfigInfo`，密钥由 `paimon.rest.storage.credential-secret-key` 提供
+  （Base64 且解码后必须恰好 32 字节）。未配该密钥时**拒绝保存**静态凭据并返回 400，
+  而不是明文落库；取值非法则启动即失败。密文形态带 `v1:` 前缀，
+  兼作「这是密文还是别人手工塞进来的明文」的判别依据——明文当作密文传入会明确 500。
+- **与 `storageName` 互斥。** 两者都在回答「用哪组密钥」，同时出现返回 400，
+  而不是定义一条谁压过谁。只给 `secretAccessKey` 不给 `accessKeyId`（或反之、
+  以及换 ID 却不带新密钥）同样返回 400：无法区分是笔误还是有意为之。
+- **优先级最高且与 `stsUnavailable` 正交**，理由见第 3 点。
+
+代价同样是 `storageConfigInfo` 的字段集合超出规格。影响面比 OBS / OSS 更小：
+引擎只是把 `storageConfigInfo` 原样透传，多出来的两个字段它读不懂也不会读
+（真正的凭据是服务端在下发时替换成 `s3.access-key-id` 这类键的），
+因此 REST Catalog 协议本身不受影响。反过来说，**用 Polaris 服务端读本工程建的 catalog**
+只会多看到一个不认识的字段，不会因此失败。
+
+### 6. 元数据模型按「当前值 + 历史版本」组织
 
 - 表 schema：实体上保存当前版本，`paimon_table_schema` 保存全部历史版本，支撑 `rollback-schema`。
 - 快照：按 `snapshot_id` 单调存放，`rollback` 丢弃目标之后的记录并回移表指针。
 - 分区：以规范化 spec 键唯一标识，统计遵循规格的「负值为未测量、覆盖与累加语义不同」约定。
   唯一约束落在 spec 键的**摘要**上而非原文上，原因见第八节第 11 点。
 
-### 5. 多态变更在服务层分派
+### 7. 多态变更在服务层分派
 
 规格中 `SchemaChange`（12 种）、`ViewChange`（6 种）、`FunctionChange`（6 种）都是以
 `action` 判别的多态联合。实现上统一按 `List<Map<String,Object>>` 接收，在
@@ -274,3 +321,6 @@ Jackson 2.15.2 抬到 2.21.x，并替换 netty 与 jersey，导致 Spark 侧出�
     索引长度与值的实际长度解耦而唯一性语义不变。摘要在 `@PrePersist` / `@PreUpdate`
     里由原文重算，不依赖调用方是否记得规范化。
     注意：这是**面向 MySQL 的必要改动**，不是可选的优化。
+12. **静态凭据的加密密钥不支持多代共存**。轮换 `paimon.rest.storage.credential-secret-key`
+    会让库里已有的密文全部解不开，必须配合一次凭据重录。细节见
+    [`../README.md`](../README.md) 第 6 节「实现说明与已知边界」第 20 条。

@@ -115,7 +115,7 @@ mysql -h 127.0.0.1 -u root -p < sql/schema-mysql.sql
 # 全量构建
 JAVA_HOME=/path/to/jdk-21 ./mvnw -DskipTests install
 
-# 运行全部测试（服务端 226 + Spark 76，共 302 个用例）
+# 运行全部测试（服务端 258 + Spark 76，共 334 个用例）
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
 
 # 启动服务端（默认 8080 端口，连 MySQL，预置 catalog prefix=paimon 与 database=default）
@@ -340,6 +340,7 @@ Catalog 侧与鉴权：
 | `paimon.rest.storage.oss.secret-key` | 空 | 同上 |
 | `paimon.rest.storage.oss.session-token` | 空 | OSS 临时凭据的安全令牌（阿里侧键名为 `securityToken`） |
 | `paimon.rest.storage.oss.storages.<name>.access-key` | 空 | OSS 具名存储，另支持 `.secret-key` / `.session-token` |
+| `paimon.rest.storage.credential-secret-key` | 空 | catalog 自带静态凭据的落库加密密钥，Base64 且解码后**恰好 32 字节**；留空则关闭静态凭据，见下方说明 |
 | `paimon.rest.storage.clients-cache-max-size` | 空 | 保留项，见下方说明 |
 | `paimon.rest.storage.max-http-connections` | 空 | 保留项，见下方说明 |
 | `paimon.rest.storage.read-timeout` | 空 | 读取超时；正数校验 |
@@ -355,6 +356,29 @@ Catalog 侧与鉴权：
 `paimon.rest.storage.obs.*` 与 `paimon.rest.storage.oss.*` 两组**没有 Polaris 侧的对应项**
 ——Polaris 没有这两个存储类型，它在 S3 兼容层上接入华为云与阿里云。
 本工程单列，是为了让这两家的 AK/SK 独立于 S3 那一份，各按各自的节奏轮转与授权。
+
+**catalog 自带的静态凭据**是另一处在 Polaris 规格之外的扩展：
+`S3` / `OBS` / `OSS` 三种 `storageConfigInfo` 都多出 `accessKeyId` 与 `secretAccessKey`
+两个字段，填写后该 catalog 就用这把钥匙访问对象存储，不必把密钥写进服务端配置。
+参照 Polaris 的路径接入不提供 STS 的兼容 S3 存储（MinIO、Ceph RGW、Ozone、FlashBlade 等）
+要写 `stsUnavailable: true`，此时服务端不再下发任何密钥，引擎只能靠自己的凭据链；
+静态凭据补上的正是这一格——它表达的是「下发用户自己填进来的长期密钥」，
+与 `stsUnavailable` 的「服务端不去向云申请临时凭据」是两件事，
+因此**静态凭据排在 `stsUnavailable` 之前**，两者同时出现不冲突。
+
+- `accessKeyId` 可读可写。它不是秘密，保留下来是为了让控制台能显示「配的是哪把钥匙」，
+  也是判断这个 catalog「有没有配凭据」的依据。
+- `secretAccessKey` **只写不读**。落库前用 AES-GCM（AES-256）加密，任何响应都不回显，
+  因此 `PUT` 省略它表示**保持原值**而不是清空——这是规格 `PUT`「整体替换」语义的唯一例外，
+  否则每次改 `endpoint` 都得重新贴一遍密钥。
+- 想清除已配的凭据，显式提交一对空串（控制台表单里有「移除已保存的静态凭据」按钮），
+  之后下发退回服务端配置那一级。只给其中一个会返回 400：有密钥没 ID、换 ID 不带新密钥、
+  空 ID 配非空密钥，都无法区分是笔误还是有意为之。
+- 静态凭据与 `storageName` **互斥**，两者都在回答「用哪组密钥」，同时出现返回 400。
+- 未配 `credential-secret-key` 时**拒绝保存**静态凭据（400，错误信息给出生成命令
+  `openssl rand -base64 32`），而不是明文落库；取值不是 Base64 或解码后不是 32 字节则启动即失败。
+  轮换该密钥要注意：旧密文用新密钥解不开，读取该 catalog 的凭据会以 500 明确失败，
+  不会静默退回服务端配置，需要重新提交一次凭据。
 
 「保留项」指这些取值会被校验并在启动时打进日志，但当前实现没有出网的对象存储客户端，
 JDK 的 `HttpClient` 也没有对应的调节项，因此它们不改变行为。保留是为了让配置面与 Polaris
@@ -373,7 +397,7 @@ JDK 的 `HttpClient` 也没有对应的调节项，因此它们不改变行为�
 
 | storageType | 下发的键 | 密钥来源 |
 | --- | --- | --- |
-| `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | 具名存储 → 默认配置 → 环境凭据链 |
+| `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | catalog 静态凭据 → 具名存储 → 默认配置 → 环境凭据链 |
 | `AZURE` | `azure.tenant-id`、`azure.account`、`azure.hierarchical`、`azure.multi-tenant-app-name`、`azure.consent-url` | 仅定位元数据，见下 |
 | `GCS` | `gcs.oauth2.token`、`gcs.oauth2.token-expires-at`、`gcs.service-account` | 服务端配置 → 环境凭据链 |
 | `OBS` | `fs.obs.access.key`、`fs.obs.secret.key`、`fs.obs.session.token`、`fs.obs.endpoint` | 具名存储 → 默认配置 → 环境凭据链 |
@@ -471,12 +495,16 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
     把令牌映射成真正的名字。授权判定读的是未归一化的主体名，两者互不影响。
     **刻意不通过加宽这三列来解决**：它们会被接口原样返回，加宽等于让凭据明文入库并可被读回；
     且主体名长度没有上界，加宽只是把溢出推后，还要对 14 张表共 42 个列做迁移。
+20. **静态凭据的加密密钥不支持多代共存**。`paimon.rest.storage.credential-secret-key`
+    换值后，库里已有的密文用新密钥解不开，读取那个 catalog 的凭据会以 **500** 明确失败
+    （不是静默退回服务端配置），需要重新提交一次凭据。做成多代密钥要同时保存密钥列表与
+    「这条密文是第几代」，当前规模下不值得；代价是**轮换密钥必须配合一次凭据重录**。
 
 ---
 
 ## 7. 测试
 
-### 单元与集成测试（302 个用例）
+### 单元与集成测试（334 个用例）
 
 ```bash
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
@@ -485,16 +513,19 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 测试连的是内存 H2（`test` profile，见 `src/test/resources/application-test.yml`），
 **不依赖本机是否有 MySQL**。
 
-服务端（226 个）：
+服务端（258 个）：
 
 | 测试类 | 覆盖 |
 | --- | --- |
 | `PaimonRestCatalogApiTests` | 配置发现、建表与 schema 变更（加列 / 列改名 / 改类型 / 改可空性 / 改属性）/ 回滚、快照提交与乐观并发、分区统计、表重命名（改名不动数据位置、跨库重命名、目标名被占用 409）、视图与函数、语义视图 1 MiB 上限、消费者位点、凭证下发与 403、各类 404 的 `resourceType` |
 | `ManagementApiTests` | 管理 API 的主体、角色、装配与授权链路 |
 | `StorageConfigApiTests` | `storageConfigInfo` 六种存储类型的建 / 读 / 改往返、`AZURE` 缺 `tenantId` 与空位置的 400、换存储后新库位置随之改变、OBS↔OSS 换类型时端点一起替换 |
-| `StorageConfigDtosTests` | 判别联合的绑定位形：子类型注册名与枚举一致、判别字段只出现一次、跨类型字段不串、落库路径（`Json`）往返 |
+| `StorageConfigDtosTests` | 判别联合的绑定位形：子类型注册名与枚举一致、判别字段只出现一次、跨类型字段不串、落库路径（`Json`）往返、静态凭据字段随实体往返 |
 | `StorageCredentialApiTests` | 按存储类型下发凭据的 HTTP 链路：S3 的密钥来源（默认配置与具名存储）与不下发 `endpointInternal` / `stsEndpoint`、`stsUnavailable` 时不给密钥、Azure 只给定位元数据、GCS 的 `lifespan` 收窄 `expiresAt`、OBS / OSS 各自走对键族且不串族、FILE 保留自包含令牌、未过期凭据被复用（比对 `expiresAt` 而非密钥） |
-| `StorageCredentialResolutionTests` | 凭据解析与缓存的单元行为：具名存储优先且找不到时明确失败而非退回默认凭据、服务端专用字段不泄露、Azure 账户名只在已知端点后缀上解析、GCS `lifespan` 与 `ttl` 取小、OBS / OSS 的键名族与临时凭据令牌（含两家不同拼写）、两家的凭据互不可见、LRU 淘汰与过期失效、两个策略枚举的取值校验与错误信息 |
+| `StorageCredentialResolutionTests` | 凭据解析与缓存的单元行为：具名存储优先且找不到时明确失败而非退回默认凭据、服务端专用字段不泄露、Azure 账户名只在已知端点后缀上解析、GCS `lifespan` 与 `ttl` 取小、OBS / OSS 的键名族与临时凭据令牌（含两家不同拼写）、两家的凭据互不可见、LRU 淘汰与过期失效、两个策略枚举的取值校验与错误信息；**catalog 静态凭据压过一切服务端来源、在 `stsUnavailable` 下仍然下发、OBS / OSS 各走自己的键族、密文解不开或不是密文时明确失败而非静默退回** |
+| `StaticCredentialApiTests` | catalog 静态凭据的 HTTP 语义（配了加密密钥）：创建响应不回显密钥而库内是密文且能解回原值、凭据下发优先用 catalog 这一份、`PUT` 省略密钥表示保持、完全不带凭据字段也表示保持、提交一对空串即清除并退回服务端配置、只给密钥 / 换 ID 不带新密钥 / 空 ID 配非空密钥各自 400、与 `storageName` 互斥 400、OBS 与 OSS 同样支持、meta 报告 `staticCredentialsEnabled` |
+| `StaticCredentialDisabledApiTests` | 未配 `credential-secret-key` 时的 fail-closed：保存静态凭据返回 400 且错误信息点明配置项与 `openssl rand -base64 32`、**不带凭据的 catalog 照常可建**（对照组，防「顺手把整个存储配置关掉」）、meta 报告能力已关闭 |
+| `CredentialCipherTests` | 落库加解密单元行为：往返、同一明文两次密文不同（随机 IV）、空值保持空、未配密钥时拒绝加密、换密钥后解不开、密文被篡改时认证失败、明文当密文传入被拒、密文载荷畸形被拒、密钥不是 Base64 或解码后不是 32 字节时启动即失败、留空的密钥视为关闭 |
 | `StoragePolicyApiTests` | `file-io.type=s3` 时拒绝 Azure / GCS / OBS / OSS catalog 并在报错里点明原因、接受 S3 与 FILE；`credential-manager.type=noop` 时凭据下发返回 501 |
 | `AuthorizationTests` | 权限蕴含与判定的单元行为 |
 | `CatalogEndpointAuthorizationTests` | 从运行时请求映射枚举全部 `/v1/{prefix}/**` 端点，逐一核对授权映射是否已登记——新增端点若忘记登记映射会让构建失败 |
@@ -730,8 +761,9 @@ http://localhost:8080/console/
   因此 `./mvnw package` 与 Dockerfile 都不需要 Node；代价是改了前端必须重建并提交产物，
   用 `./scripts/build-console.sh` 一条命令完成构建与校验。
 - **路径不靠人工比对。** 全部端点收在 `paimon-rest-console/src/api/endpoints.js` 一张表里，
-  由 `scripts/verify-console.py` 与两份 OpenAPI 规格机械比对（10 组 21 项：端点存在性、
-  引用完整性、五处基址一致、产物新鲜度、请求体形状、对话框状态、下拉候选来源）；
+  由 `scripts/verify-console.py` 与两份 OpenAPI 规格机械比对（11 组 28 项：端点存在性、
+  引用完整性、五处基址一致、产物新鲜度、请求体形状、对话框状态、下拉候选来源、
+  静态凭据字段与服务端的一致性）；
   服务端侧 `ConsoleApiTests` 守住静态资源托管与 SPA 深链回退。
 
 ### 9.1 登录与鉴权

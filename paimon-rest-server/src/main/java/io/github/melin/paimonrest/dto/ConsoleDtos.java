@@ -67,17 +67,25 @@ public final class ConsoleDtos {
     }
 
     /**
-     * 枚举取值。
+     * 枚举取值与能力开关。
      *
      * <p>{@code storageTypes} 是全部取值，{@code supportedStorageTypes} 是本部署实际可用的子集
      * （由 {@code file-io.type} 决定）。分成两个列表而不是一个带标记的列表：
      * 控制台需要把不可用的取值渲染成禁用项，而不是干脆不显示——
      * 让人看到「有 OBS 这个类型但当前部署没开」，比看不到要好。
+     *
+     * <p>{@code staticCredentialsEnabled} 同为能力开关：它由
+     * {@code paimon.rest.storage.credential-secret-key} 是否配置决定，
+     * 与 {@code supportedStorageTypes} 正交（存储类型可用，不代表能保存静态凭据）。
+     * 放进元数据是为了让控制台**在提交前**就说明「本部署没开这个能力」，
+     * 而不是让用户填完 AK/SK 再吃一个 400。
      */
     public record Enums(
             List<String> catalogTypes,
             List<String> storageTypes,
             List<String> supportedStorageTypes,
+            /** 能否把静态凭据加密落库（{@code paimon.rest.storage.credential-secret-key} 已配置）。 */
+            boolean staticCredentialsEnabled,
             List<String> credentialManagerTypes,
             List<String> fileIoTypes,
             List<String> grantTypes,

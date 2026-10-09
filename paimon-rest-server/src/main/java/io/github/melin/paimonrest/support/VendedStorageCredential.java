@@ -30,6 +30,13 @@ public record VendedStorageCredential(Map<String, String> token,
     /** 密钥来源为服务端配置里的具名存储，实际取值形如 {@code named-storage:<name>}。 */
     public static final String SOURCE_NAMED_STORAGE_PREFIX = "named-storage:";
 
+    /**
+     * 密钥来源为 catalog 自己带的静态凭据（{@code storageConfigInfo.accessKeyId}）。
+     *
+     * <p>这是最具体的一级：catalog 显式写下了「用这把钥匙」，就不再去找服务端配置。
+     */
+    public static final String SOURCE_STATIC_CREDENTIALS = "static-credentials";
+
     /** 服务端无凭据，交给引擎的环境凭据链。 */
     public static final String SOURCE_ENVIRONMENT = "environment";
 
@@ -63,6 +70,7 @@ public record VendedStorageCredential(Map<String, String> token,
      * 而「密钥从哪一级取到」这个信息，下发方本来就已经算出来了。
      */
     public boolean hasSecrets() {
-        return SOURCE_CONFIGURATION.equals(source) || namedStorage();
+        return SOURCE_CONFIGURATION.equals(source) || namedStorage()
+                || SOURCE_STATIC_CREDENTIALS.equals(source);
     }
 }

@@ -91,3 +91,11 @@ schema、函数定义、分区 spec 等结构以 JSON 文本存进单列，实�
 避免为每个属性建表；复杂结构通过 `AttributeConverter` 转换。
 `storageConfigInfo` 同样整份存一列 JSON，`storage_type` 与
 `allowed_locations_json` 是它的投影列，便于直接用 SQL 筛选。
+
+这一列里唯一不是原样存储的是 catalog 自带静态凭据的 `secretAccessKey`：
+写库前用 AES-GCM 加密成 `v1:<base64(iv ‖ 密文+tag)>` 再塞进这段 JSON，
+因此直接查库看到的是密文，而接口层还会再抹一次（`StorageConfigs.withoutSecrets`）
+——两处都是必要的，只做一处等于没做。加密密钥不落库，来自
+`paimon.rest.storage.credential-secret-key`，所以**换密钥等于换密文**：
+旧密文解不开会明确报 500，需要重新提交一次凭据
+（见 [`../README.md`](../README.md) 第 6 节「实现说明与已知边界」第 20 条）。

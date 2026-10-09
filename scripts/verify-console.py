@@ -22,6 +22,8 @@ spec/polaris-management-service.yml）。路径写错时前端只表现为「空
   9. 对话框       每个 el-dialog 都声明 destroy-on-close（否则编辑时会残留上一次的状态）
  10. 下拉选项     每个 el-select 都声明了候选来源（漏写 el-option 时点开只有「无数据」，
                   而这类漏写编译、类型检查与单元测试都不会报）
+ 11. 静态凭据     catalog 自带 AK/SK 这条链路跨「服务端 DTO / 支持的类型 / 能力开关的
+                  暴露 / 前端表单」四处，任何一处漏改都表现为「填了没反应」或「填完才 400」
 
 用法：
     python3 scripts/verify-console.py
@@ -60,6 +62,20 @@ MANAGEMENT_SPEC = os.path.join(ROOT, "spec/polaris-management-service.yml")
 
 CONSOLE_ASSETS = os.path.join(
     ROOT, "paimon-rest-server/src/main/resources/static/console")
+
+SERVER_JAVA = os.path.join(
+    ROOT, "paimon-rest-server/src/main/java/io/github/melin/paimonrest")
+
+STORAGE_DTOS = os.path.join(SERVER_JAVA, "dto/StorageDtos.java")
+STORAGE_CONFIGS = os.path.join(SERVER_JAVA, "support/StorageConfigs.java")
+CONSOLE_DTOS = os.path.join(SERVER_JAVA, "dto/ConsoleDtos.java")
+CONSOLE_META_SERVICE = os.path.join(SERVER_JAVA, "service/ConsoleMetaService.java")
+MANAGEMENT_CATALOG_SERVICE = os.path.join(
+    SERVER_JAVA, "service/ManagementCatalogService.java")
+
+STORAGE_CONFIG_FIELDS = os.path.join(
+    CONSOLE_DIR, "src/components/StorageConfigFields.vue")
+CATALOGS_VIEW = os.path.join(CONSOLE_DIR, "src/views/CatalogsView.vue")
 
 # 管理规格的 servers[0].url 是 {scheme}://{host}/api/management/v1，路径要去掉基址才可比
 MANAGEMENT_BASE = "/api/management/v1"
@@ -470,6 +486,139 @@ for path in vue_files:
 check(f"全部 {select_count} 个下拉都声明了候选来源（或显式豁免为自由输入）",
       not empty_selects,
       "\n".join(empty_selects))
+
+# ------------------------------------------------------------------ 11. 静态凭据
+
+print("11. 静态凭据（表单 ↔ 服务端字段与能力开关）")
+
+# catalog 自带的 AK/SK 是超出规格的扩展，它这条链路横跨四个文件：服务端 DTO 声明字段、
+# StorageConfigs 决定哪些类型有这对字段、ConsoleDtos / ConsoleMetaService 把「本部署能不能
+# 加密落库」报给前端、前端据此决定渲染与校验。任何一处漏改的表现都是「填了没反应」
+# 或「填完才吃一个 400」——都是要真点进去才发现的那类问题，因此在这里静态钉住。
+storage_dtos = read(STORAGE_DTOS)
+storage_configs = read(STORAGE_CONFIGS)
+fields_vue = read(STORAGE_CONFIG_FIELDS)
+
+
+def record_shapes(source):
+    """从 Java record 声明里取「参数列表」与「storageType() 返回的枚举值」。
+
+    不另抄一份「哪个 record 对应哪个 storageType」的名单：抄了就会漂移，
+    而漂移的表现是校验静默放过一个已经改了名字的类型。
+    """
+    shapes = {}
+    for match in re.finditer(r"public record (\w+)\(", source):
+        name = match.group(1)
+        tail = source[match.end():]
+        next_record = re.search(r"\n    public record ", tail)
+        block = tail[:next_record.start()] if next_record else tail
+        header = block[:block.index(")")] if ")" in block else block
+        wire = re.search(r"ManagementEnums\.StorageType\.(\w+)", block)
+        shapes[name] = (header, wire.group(1) if wire else None)
+    return shapes
+
+
+def parameter_names(header):
+    """record 头里的参数名。先去掉泛型（`List<String>` 里的逗号不参与分隔）。"""
+    names = []
+    for part in re.sub(r"<[^>]*>", "", header).split(","):
+        part = part.strip()
+        if part:
+            names.append(re.split(r"\s+", part)[-1])
+    return names
+
+
+shapes = record_shapes(storage_dtos)
+by_type = {wire: name for name, (_, wire) in shapes.items() if wire}
+
+server_types = []
+method = re.search(
+    r"supportsStaticCredentials\(StorageConfigInfo info\)\s*\{(.*?)\n    \}",
+    storage_configs, re.S)
+for cls in re.findall(r"instanceof (\w+)", method.group(1) if method else ""):
+    if shapes.get(cls, (None, None))[1]:
+        server_types.append(shapes[cls][1])
+server_types = sorted(server_types)
+
+vue_types_source = re.search(
+    r"STATIC_CREDENTIAL_TYPES\s*=\s*\[([^\]]*)\]", fields_vue)
+vue_types = sorted(re.findall(r"'([^']+)'", vue_types_source.group(1))) \
+    if vue_types_source else []
+
+check("表单承载静态凭据的类型与服务端 supportsStaticCredentials 一致",
+      server_types and vue_types == server_types,
+      f"StorageConfigs.java={server_types or '未解析出 instanceof 分支'}，"
+      f"StorageConfigFields.vue={vue_types or '未找到 STATIC_CREDENTIAL_TYPES'}")
+
+vue_keys_source = re.search(
+    r"STATIC_CREDENTIAL_KEYS\s*=\s*\[([^\]]*)\]", fields_vue)
+vue_keys = sorted(re.findall(r"'([^']+)'", vue_keys_source.group(1))) \
+    if vue_keys_source else []
+# 「像凭据的」参数名。新加第三个凭据字段却忘了在表单里处理时，这条会报出来
+CREDENTIAL_HINT = re.compile(r"(?i)accesskey|secret|credential")
+
+mismatched = []
+for wire in vue_types:
+    shape = shapes.get(by_type.get(wire, ""), None)
+    if shape is None:
+        mismatched.append(f"{wire} 在 StorageDtos.java 里找不到对应的 record")
+        continue
+    declared = sorted(name for name in parameter_names(shape[0])
+                      if CREDENTIAL_HINT.search(name))
+    if declared != vue_keys:
+        mismatched.append(f"{wire}: 服务端 {declared}，前端 {vue_keys}")
+check(f"三种类型的凭据字段名与服务端 DTO 逐字一致（{vue_keys or '未知'}）",
+      vue_keys and not mismatched,
+      "\n".join(mismatched))
+
+# 这两个字段是本工程加的：万一上游规格哪天也加了同名但语义不同的字段，
+# 这条会失败，提醒先去对齐语义再决定是否还叫「扩展」。
+management_schemas = (yaml.safe_load(read(MANAGEMENT_SPEC)).get("components")
+                      or {}).get("schemas") or {}
+
+
+def schema_properties(schema):
+    names = set(schema.get("properties") or {}) if isinstance(schema, dict) else set()
+    for part in (schema or {}).get("allOf") or []:
+        if isinstance(part, dict):
+            names |= set(part.get("properties") or {})
+    return names
+
+
+spec_properties = (schema_properties(management_schemas.get("StorageConfigInfo"))
+                   | schema_properties(management_schemas.get("AwsStorageConfigInfo")))
+overlapping = sorted(set(vue_keys) & spec_properties)
+check("规格里没有这两个字段（它们确实是本工程的扩展）",
+      bool(vue_keys) and not overlapping,
+      f"管理规格的 StorageConfigInfo / AwsStorageConfigInfo 已含 {overlapping}，"
+      f"需要重新确认语义后再决定是否沿用同一组字段名")
+
+console_dtos = read(CONSOLE_DTOS)
+meta_service = read(CONSOLE_META_SERVICE)
+check("服务端在 meta 里声明并如实赋值 staticCredentialsEnabled",
+      "boolean staticCredentialsEnabled" in console_dtos and "cipher.available()" in meta_service,
+      "ConsoleDtos.Enums 需要声明该字段，ConsoleMetaService.enums() 需要传 cipher.available()")
+
+catalogs_view = read(CATALOGS_VIEW)
+wiring = {
+    "CatalogsView 从 meta 取值": "enums?.staticCredentialsEnabled" in catalogs_view,
+    "CatalogsView 传给表单": ':static-credentials-enabled="staticCredentialsEnabled"' in catalogs_view,
+    "表单声明该 prop": "staticCredentialsEnabled: { type: Boolean, default: false }" in fields_vue,
+}
+check("能力开关从 meta 一路传到表单的 prop",
+      all(wiring.values()),
+      "\n".join(name for name, ok in wiring.items() if not ok))
+
+check("能力关着时表单给出可操作的提示（而不是把字段藏起来）",
+      "paimon.rest.storage.credential-secret-key" in fields_vue
+      and "openssl rand -base64 32" in fields_vue,
+      "StorageConfigFields.vue 应说明该开哪个配置项以及生成密钥的命令")
+
+# 读路径的脱敏：`toDto` 只要漏掉这一层，密文就会原样出现在每个 catalog 的响应里
+# ——而客户端拿到一串 base64 并不会报错，它只会安静地把密文当成配置再写回去。
+check("管理 API 读路径对存储配置脱敏（withoutSecrets）",
+      "withoutSecrets" in read(MANAGEMENT_CATALOG_SERVICE),
+      "ManagementCatalogService 的 toDto 需要在返回前抹掉 secretAccessKey 的密文")
 
 # ------------------------------------------------------------------ 汇总
 

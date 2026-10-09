@@ -3,6 +3,7 @@ package io.github.melin.paimonrest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -18,8 +19,10 @@ import io.github.melin.paimonrest.dto.StorageDtos.StorageConfigInfo;
 import io.github.melin.paimonrest.service.DefaultStorageCredentialManager;
 import io.github.melin.paimonrest.service.StorageCredentialCache;
 import io.github.melin.paimonrest.support.ApiException;
+import io.github.melin.paimonrest.support.CredentialCipher;
 import io.github.melin.paimonrest.support.CredentialManagerType;
 import io.github.melin.paimonrest.support.FileIoType;
+import io.github.melin.paimonrest.support.StorageConfigs;
 import io.github.melin.paimonrest.support.VendedStorageCredential;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -40,9 +43,26 @@ import org.junit.jupiter.api.Test;
  */
 class StorageCredentialResolutionTests {
 
+    /** base64 的 32 字节：静态凭据在库里是密文，本类要用真密钥把它解出来。 */
+    private static final String CREDENTIAL_SECRET_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
     private final RestServerProperties properties = new RestServerProperties();
 
-    private final DefaultStorageCredentialManager manager = new DefaultStorageCredentialManager(properties);
+    private final CredentialCipher cipher = configuredCipher(properties);
+
+    private final DefaultStorageCredentialManager manager = new DefaultStorageCredentialManager(properties, cipher);
+
+    /**
+     * 配好密钥的 cipher。
+     *
+     * <p>不配密钥时 {@code seal} 会拒绝——这正是写路径想要的失败方向，
+     * 但本类测的是下发优先级，需要能把凭据密封进配置里。密钥与密文的对应关系
+     * 由 {@code CredentialCipherTests} 单独守住，这里只把它当工具用。
+     */
+    private static CredentialCipher configuredCipher(RestServerProperties properties) {
+        properties.getStorage().setCredentialSecretKey(CREDENTIAL_SECRET_KEY);
+        return new CredentialCipher(properties);
+    }
 
     private StorageCredentialCache cache() {
         return new StorageCredentialCache(properties);
@@ -104,7 +124,7 @@ class StorageCredentialResolutionTests {
         setDefaultAwsKeys("AKIA-DEFAULT", "SECRET-DEFAULT");
         AwsStorageConfigInfo config = new AwsStorageConfigInfo(List.of("s3://bucket-a/prefix"), null,
                 null, null, null, null, null, "us-east-1", null, null,
-                Boolean.TRUE, null, null, null);
+                Boolean.TRUE, null, null, null, null, null);
 
         VendedStorageCredential vended = manager.vend(config, "t1", null);
 
@@ -127,7 +147,7 @@ class StorageCredentialResolutionTests {
                 "arn:aws:iam::123:role/r", "ext-id", "arn:aws:iam::123:user/u",
                 List.of("arn:aws:kms:key/1"), List.of("arn:aws:kms:key/2"), "us-east-1",
                 "https://s3.example.com", "https://sts.example.com", null,
-                "https://s3.internal.example.com", Boolean.TRUE, null);
+                "https://s3.internal.example.com", Boolean.TRUE, null, null, null);
 
         VendedStorageCredential vended = manager.vend(config, "t1", null);
 
@@ -140,6 +160,132 @@ class StorageCredentialResolutionTests {
         assertEquals("us-east-1", vended.token().get("s3.region"));
         assertEquals("https://s3.example.com", vended.token().get("s3.endpoint"));
         assertEquals("true", vended.token().get("s3.path-style-access"));
+    }
+
+    // ------------------------------------------------------------------ 静态凭据
+
+    /**
+     * catalog 自带的静态凭据优先于服务端配置的一切来源。
+     *
+     * <p>同时配好默认凭据与具名存储，才能证明这一级真的排在最前——
+     * 只配一个时，取值相同也可能是别的分支命中的。
+     */
+    @Test
+    void s3PrefersCatalogStaticCredentialsOverEveryServerSideSource() {
+        setDefaultAwsKeys("AKIA-DEFAULT", "SECRET-DEFAULT");
+        namedKeys("warehouse-a", "AKIA-NAMED", "SECRET-NAMED");
+        AwsStorageConfigInfo config = s3("s3://bucket-a/prefix", "warehouse-a",
+                "AKIA-CATALOG", cipher.seal("SECRET-CATALOG"));
+
+        VendedStorageCredential vended = manager.vend(config, "t1", null);
+
+        assertEquals("AKIA-CATALOG", vended.token().get("s3.access-key-id"));
+        assertEquals("SECRET-CATALOG", vended.token().get("s3.secret-access-key"));
+        assertEquals(VendedStorageCredential.SOURCE_STATIC_CREDENTIALS, vended.source());
+        assertTrue(vended.hasSecrets(), "静态凭据属于「真的下发了密钥」");
+        assertFalse(vended.namedStorage());
+    }
+
+    /**
+     * {@code stsUnavailable} 不阻断静态凭据的下发。
+     *
+     * <p>这条是「兼容 S3 的对象存储能不能用起来」的关键：MinIO / Ceph / Ozone / FlashBlade
+     * 这类存储没有 STS，配置里照惯例会写 {@code stsUnavailable: true}。
+     * 若它优先于静态凭据，用户填了 AK/SK 却收不到，现象是「功能好像没生效」——
+     * 而 {@code stsUnavailable} 表达的是「服务端不去向云申请临时凭据」，
+     * 与「下发用户自己填进来的长期密钥」是两件事。定位配置照旧下发。
+     */
+    @Test
+    void s3StaticCredentialsSurviveStsUnavailable() {
+        AwsStorageConfigInfo config = new AwsStorageConfigInfo(List.of("s3://minio-bucket/wh"), null,
+                null, null, null, null, null, "us-east-1", "http://minio.internal:9000", null,
+                Boolean.TRUE, null, Boolean.TRUE, null,
+                "minioadmin", cipher.seal("minioadmin-secret"));
+
+        VendedStorageCredential vended = manager.vend(config, "t1", null);
+
+        assertEquals("minioadmin", vended.token().get("s3.access-key-id"));
+        assertEquals("minioadmin-secret", vended.token().get("s3.secret-access-key"));
+        assertEquals(VendedStorageCredential.SOURCE_STATIC_CREDENTIALS, vended.source());
+        assertEquals("http://minio.internal:9000", vended.token().get("s3.endpoint"));
+        assertEquals("true", vended.token().get("s3.path-style-access"));
+    }
+
+    /** OBS 用自己那套键名族下发静态凭据，不能串到 S3 或 OSS 的键上。 */
+    @Test
+    void obsVendsStaticCredentialsWithItsOwnKeyFamily() {
+        setDefaultAwsKeys("AKIA-DEFAULT", "SECRET-DEFAULT");
+        HuaweiObsStorageConfigInfo config = obsConfig("obs://analytics-bucket/warehouse/", null,
+                "obs.cn-north-4.myhuaweicloud.com", "OBS-AK", cipher.seal("OBS-SK"));
+
+        VendedStorageCredential vended = manager.vend(config, "t1", null);
+
+        assertEquals("OBS-AK", vended.token().get("fs.obs.access.key"));
+        assertEquals("OBS-SK", vended.token().get("fs.obs.secret.key"));
+        assertEquals("obs.cn-north-4.myhuaweicloud.com", vended.token().get("fs.obs.endpoint"));
+        assertEquals(VendedStorageCredential.SOURCE_STATIC_CREDENTIALS, vended.source());
+        assertFalse(hasAnyKeyStartingWith(vended.token(), "s3."), "OBS 不应下发 s3.* 键: " + vended.token());
+        assertFalse(hasAnyKeyStartingWith(vended.token(), "fs.oss."), "OBS 不应下发 OSS 键: " + vended.token());
+    }
+
+    /** OSS 同理，且键名是驼峰那一套。 */
+    @Test
+    void ossVendsStaticCredentialsWithItsOwnKeyFamily() {
+        AliyunOssStorageConfigInfo config = ossConfig("oss://analytics-bucket/warehouse/", null,
+                "oss-cn-hangzhou.aliyuncs.com", "OSS-AK", cipher.seal("OSS-SK"));
+
+        VendedStorageCredential vended = manager.vend(config, "t1", null);
+
+        assertEquals("OSS-AK", vended.token().get("fs.oss.accessKeyId"));
+        assertEquals("OSS-SK", vended.token().get("fs.oss.accessKeySecret"));
+        assertEquals("oss-cn-hangzhou.aliyuncs.com", vended.token().get("fs.oss.endpoint"));
+        assertEquals(VendedStorageCredential.SOURCE_STATIC_CREDENTIALS, vended.source());
+        assertFalse(hasAnyKeyStartingWith(vended.token(), "fs.obs."), "OSS 不应下发 OBS 键: " + vended.token());
+    }
+
+    /**
+     * 密文解不开时直接失败，不退回服务端默认凭据。
+     *
+     * <p>退回的后果是把「这个 catalog 该用哪把钥匙」从调用方明确指定降级成部署方默认——
+     * 一次加密密钥轮换会静默变成权限扩大，而且真因（换过密钥）被掩盖成「权限不对」。
+     */
+    @Test
+    void staticCredentialsFailLoudlyWhenTheyCannotBeDecrypted() {
+        setDefaultAwsKeys("AKIA-DEFAULT", "SECRET-DEFAULT");
+        RestServerProperties other = new RestServerProperties();
+        other.getStorage().setCredentialSecretKey("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=");
+        AwsStorageConfigInfo config = s3("s3://bucket-a/prefix", null,
+                "AKIA-CATALOG", new CredentialCipher(other).seal("SECRET-CATALOG"));
+
+        ApiException failure = assertThrows(ApiException.class, () -> manager.vend(config, "t1", null));
+
+        assertEquals(500, failure.getStatus());
+        assertTrue(failure.getMessage().contains("credential-secret-key"), failure.getMessage());
+    }
+
+    /** 明文混进配置里（历史数据或手改）同样拒绝，不把它当密钥发出去。 */
+    @Test
+    void staticCredentialsRejectUnsealedSecrets() {
+        AwsStorageConfigInfo config = s3("s3://bucket-a/prefix", null, "AKIA-CATALOG", "plaintext-secret");
+
+        assertEquals(500, assertThrows(ApiException.class, () -> manager.vend(config, "t1", null)).getStatus());
+    }
+
+    /** 取凭据的读取点与脱敏点分工：对外那份必须丢掉密钥，内部那份才解得出明文。 */
+    @Test
+    void maskingKeepsTheKeyIdAndDropsTheSecret() {
+        AwsStorageConfigInfo config = s3("s3://bucket-a/prefix", null,
+                "AKIA-CATALOG", cipher.seal("SECRET-CATALOG"));
+
+        AwsStorageConfigInfo masked = (AwsStorageConfigInfo) StorageConfigs.withoutSecrets(config);
+
+        assertEquals("AKIA-CATALOG", masked.accessKeyId(), "accessKeyId 不是秘密，保留给控制台显示");
+        assertNull(masked.secretAccessKey(), "对外那份不应带出密文");
+        assertEquals(List.of("s3://bucket-a/prefix"), masked.allowedLocations(), "脱敏不应动其他字段");
+        // 内部那份（库中原样）才解得出明文
+        assertEquals("SECRET-CATALOG",
+                StorageConfigs.staticCredentials(config, cipher).secretAccessKey());
+        assertEquals("AKIA-CATALOG", StorageConfigs.staticCredentials(config, cipher).accessKeyId());
     }
 
     // ------------------------------------------------------------------ Azure
@@ -313,7 +459,7 @@ class StorageCredentialResolutionTests {
 
         VendedStorageCredential vended = manager.vend(
                 new HuaweiObsStorageConfigInfo(List.of("obs://analytics/warehouse"), null,
-                        "obs.cn-north-4.myhuaweicloud.com", Boolean.TRUE),
+                        "obs.cn-north-4.myhuaweicloud.com", Boolean.TRUE, null, null),
                 "t1", null);
 
         assertFalse(vended.token().containsKey("fs.obs.access.key"));
@@ -537,8 +683,15 @@ class StorageCredentialResolutionTests {
     }
 
     private static AwsStorageConfigInfo s3(String location, String storageName) {
+        return s3(location, storageName, null, null);
+    }
+
+    /** 带静态凭据的 S3 配置。{@code sealedSecret} 是库内的形态，明文由本类自行密封。 */
+    private static AwsStorageConfigInfo s3(String location, String storageName,
+                                           String accessKeyId, String sealedSecret) {
         return new AwsStorageConfigInfo(new ArrayList<>(List.of(location)), storageName,
-                null, null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null, null,
+                accessKeyId, sealedSecret);
     }
 
     private void namedObsKeys(String name, String accessKey, String secretKey, String sessionToken) {
@@ -550,11 +703,23 @@ class StorageCredentialResolutionTests {
     }
 
     private static HuaweiObsStorageConfigInfo obsConfig(String location, String storageName, String endpoint) {
-        return new HuaweiObsStorageConfigInfo(List.of(location), storageName, endpoint, null);
+        return obsConfig(location, storageName, endpoint, null, null);
+    }
+
+    private static HuaweiObsStorageConfigInfo obsConfig(String location, String storageName, String endpoint,
+                                                       String accessKeyId, String sealedSecret) {
+        return new HuaweiObsStorageConfigInfo(List.of(location), storageName, endpoint, null,
+                accessKeyId, sealedSecret);
     }
 
     private static AliyunOssStorageConfigInfo ossConfig(String location, String storageName, String endpoint) {
-        return new AliyunOssStorageConfigInfo(List.of(location), storageName, endpoint, null);
+        return ossConfig(location, storageName, endpoint, null, null);
+    }
+
+    private static AliyunOssStorageConfigInfo ossConfig(String location, String storageName, String endpoint,
+                                                       String accessKeyId, String sealedSecret) {
+        return new AliyunOssStorageConfigInfo(List.of(location), storageName, endpoint, null,
+                accessKeyId, sealedSecret);
     }
 
     /** 键名族是否越界：断言「不含某前缀的键」比逐个断言「含哪些键」更能抓住串族。 */

@@ -31,6 +31,19 @@ import java.util.List;
  * 只接收凭据下发真正要用的定位信息（{@code endpoint}），密钥一律留在服务端配置里，
  * 与 S3 子类型不接收密钥字段的处理保持一致。
  *
+ * <p><b>静态凭据是本工程加的扩展字段。</b>规格里 {@code S3} / {@code OBS} / {@code OSS}
+ * 三种子类型都没有「用户直接填写 AK/SK」的位置：Polaris 只从服务端配置
+ * （{@code polaris.storage.aws.access-key} / 具名存储）取密钥，因此接入 MinIO、Ceph、
+ * Ozone、FlashBlade 这类兼容 S3 协议的对象存储时，密钥必须由部署方写进服务端配置。
+ * 本工程给这三种子类型各加了 {@code accessKeyId} 与 {@code secretAccessKey}，
+ * 让**建 catalog 的人**能直接指定该 catalog 用哪把钥匙。
+ *
+ * <p>两个字段的读写语义与规格里的普通字段不同，写路径由 {@code StorageConfigs}、
+ * 加密与回显由 {@code CredentialCipher} 负责，要点是：{@code secretAccessKey} 是
+ * **写-only** 的——落库前加密、任何响应中都不回显，因此 {@code PUT} 省略它表示
+ * 「保持不变」而不是「清空」（规格的 {@code PUT} 对其余字段是整体替换）。
+ * {@code accessKeyId} 不是秘密，读写都保留，控制台靠它显示「已配置哪把钥匙」。
+ *
  * <p><b>已废弃字段未建模。</b>{@code AwsStorageConfigInfo} 的 {@code currentKmsKey} 与
  * {@code allowedKmsKeys} 在规格里标了 {@code deprecated}，这里不接收也不返回，
  * 统一用 {@code encryptionKeys} / {@code decryptionKeys}。
@@ -99,7 +112,14 @@ public final class StorageDtos {
         ManagementEnums.StorageType storageType();
     }
 
-    /** {@code AwsStorageConfigInfo}：S3 或任何兼容 S3 协议的对象存储。 */
+    /**
+     * {@code AwsStorageConfigInfo}：S3 或任何兼容 S3 协议的对象存储。
+     *
+     * <p>后两个字段是本工程的扩展（见类注释）：{@code accessKeyId} 可读写，
+     * {@code secretAccessKey} 只写不读。它们与 {@code roleArn} 系列是两条互斥的路：
+     * 前者是「用这把长期钥匙直接访问」，后者是「服务端去 assume 这个角色」，
+     * 两者同时出现在一份配置里没有确定语义，由 {@code StorageConfigs} 拒绝。
+     */
     public record AwsStorageConfigInfo(List<String> allowedLocations,
                                        String storageName,
                                        String roleArn,
@@ -113,7 +133,9 @@ public final class StorageDtos {
                                        Boolean stsUnavailable,
                                        String endpointInternal,
                                        Boolean pathStyleAccess,
-                                       Boolean kmsUnavailable)
+                                       Boolean kmsUnavailable,
+                                       String accessKeyId,
+                                       String secretAccessKey)
             implements StorageConfigInfo {
 
         @Override
@@ -165,7 +187,9 @@ public final class StorageDtos {
     public record HuaweiObsStorageConfigInfo(List<String> allowedLocations,
                                              String storageName,
                                              String endpoint,
-                                             Boolean stsUnavailable)
+                                             Boolean stsUnavailable,
+                                             String accessKeyId,
+                                             String secretAccessKey)
             implements StorageConfigInfo {
 
         @Override
@@ -184,7 +208,9 @@ public final class StorageDtos {
     public record AliyunOssStorageConfigInfo(List<String> allowedLocations,
                                              String storageName,
                                              String endpoint,
-                                             Boolean stsUnavailable)
+                                             Boolean stsUnavailable,
+                                             String accessKeyId,
+                                             String secretAccessKey)
             implements StorageConfigInfo {
 
         @Override

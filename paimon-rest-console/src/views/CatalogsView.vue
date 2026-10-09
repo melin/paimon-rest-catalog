@@ -142,6 +142,7 @@
         v-model="dialog.storageConfigInfo"
         :storage-types="storageTypes"
         :supported-types="supportedTypes"
+        :static-credentials-enabled="staticCredentialsEnabled"
       />
 
       <el-divider content-position="left">目录属性（properties）</el-divider>
@@ -182,6 +183,13 @@ const meta = computed(() => session.state.meta)
 const catalogTypes = computed(() => meta.value?.enums?.catalogTypes || ['INTERNAL', 'EXTERNAL'])
 const storageTypes = computed(() => meta.value?.enums?.storageTypes || ['S3', 'GCS', 'AZURE', 'OBS', 'OSS', 'FILE'])
 const supportedTypes = computed(() => meta.value?.enums?.supportedStorageTypes || [])
+/**
+ * 本部署能否保存静态凭据（服务端配了落库加密密钥）。
+ *
+ * <p>取不到元数据时按 false 处理：乐观放开的代价是用户填完 AK/SK 再吃一个 400，
+ * 而保守禁用的代价只是「暂时不能填」，且表单会说明原因。
+ */
+const staticCredentialsEnabled = computed(() => meta.value?.enums?.staticCredentialsEnabled === true)
 
 const storageForm = ref(null)
 

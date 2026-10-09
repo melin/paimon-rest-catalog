@@ -175,8 +175,9 @@ class StorageConfigDtosTests {
 
         String written = mapper.writeValueAsString(obs);
         assertTrue(written.contains("\"storageType\":\"OBS\""), written);
-        assertFalse(written.contains("accessKeyId"), "OBS 不该带出 OSS 字段: " + written);
+        assertFalse(written.contains("roleArn"), "OBS 不该带出 S3 字段: " + written);
         assertFalse(written.contains("tenantId"), "OBS 不该带出 Azure 字段: " + written);
+        assertFalse(written.contains("gcsServiceAccount"), "OBS 不该带出 GCS 字段: " + written);
     }
 
     @Test
@@ -205,7 +206,7 @@ class StorageConfigDtosTests {
     void extensionStorageConfigsSurvivePersistence() {
         AliyunOssStorageConfigInfo oss = new AliyunOssStorageConfigInfo(
                 List.of("oss://analytics-bucket/warehouse/"), "named-oss",
-                "oss-cn-hangzhou.aliyuncs.com", null);
+                "oss-cn-hangzhou.aliyuncs.com", null, null, null);
 
         String stored = Json.write(oss);
 
@@ -214,8 +215,42 @@ class StorageConfigDtosTests {
 
         HuaweiObsStorageConfigInfo obs = new HuaweiObsStorageConfigInfo(
                 List.of("obs://analytics-bucket/warehouse/"), null,
-                "obs.cn-north-4.myhuaweicloud.com", Boolean.TRUE);
+                "obs.cn-north-4.myhuaweicloud.com", Boolean.TRUE, null, null);
         assertEquals(obs, Json.read(Json.write(obs), StorageConfigInfo.class));
+    }
+
+    /**
+     * 静态凭据字段要能落库往返。
+     *
+     * <p>它记的是**库内形态**：{@code secretAccessKey} 在库里是密文，加解密是
+     * {@code CredentialCipher} 的职责，本层只负责「这串字符不丢」。脱敏与合并规则
+     * 由 {@code StorageConfigs} 与 {@code StaticCredentialApiTests} 覆盖。
+     */
+    @Test
+    void staticCredentialFieldsSurvivePersistence() {
+        AwsStorageConfigInfo s3 = new AwsStorageConfigInfo(
+                List.of("s3://bucket/warehouse/"), null, null, null, null, null, null,
+                "us-east-1", "http://minio.internal:9000", null, Boolean.TRUE,
+                null, Boolean.TRUE, null, "minioadmin", "v1:c2VhbGVkLXNlY3JldA==");
+
+        String stored = Json.write(s3);
+
+        assertTrue(stored.contains("\"accessKeyId\":\"minioadmin\""), stored);
+        assertTrue(stored.contains("\"secretAccessKey\""), stored);
+        assertEquals(s3, Json.read(stored, StorageConfigInfo.class));
+
+        // OBS / OSS 的字段与 S3 同名同义，各自往返一次
+        HuaweiObsStorageConfigInfo obs = new HuaweiObsStorageConfigInfo(
+                List.of("obs://b/warehouse/"), null, null, null, "obs-ak", "v1:obss");
+        assertEquals(obs, Json.read(Json.write(obs), StorageConfigInfo.class));
+        AliyunOssStorageConfigInfo oss = new AliyunOssStorageConfigInfo(
+                List.of("oss://b/warehouse/"), null, null, null, "oss-ak", "v1:osss");
+        assertEquals(oss, Json.read(Json.write(oss), StorageConfigInfo.class));
+
+        // 没有这对字段的类型不该凭空长出它们
+        String file = Json.write(new FileStorageConfigInfo(List.of("file:///tmp/wh"), null));
+        assertFalse(file.contains("accessKeyId"), file);
+        assertFalse(file.contains("secretAccessKey"), file);
     }
 
     /**
@@ -229,7 +264,7 @@ class StorageConfigDtosTests {
     void discriminatorIsWrittenExactlyOnce() {
         AwsStorageConfigInfo s3 = new AwsStorageConfigInfo(
                 List.of("s3://bucket/"), "named", "arn:aws:iam::1:role/r",
-                null, null, null, null, "us-east-1", null, null, null, null, null, null);
+                null, null, null, null, "us-east-1", null, null, null, null, null, null, null, null);
 
         String written = mapper.writeValueAsString(s3);
         int first = written.indexOf("\"storageType\"");

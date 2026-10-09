@@ -85,6 +85,55 @@
         </el-form-item>
       </template>
 
+      <template v-if="supportsStaticCredentials">
+        <el-divider content-position="left">静态凭据（可选）</el-divider>
+
+        <el-form-item>
+          <template #label>
+            <FieldLabel
+              label="accessKeyId"
+              tip="该 catalog 访问对象存储用的长期密钥 ID。与具名存储（storageName）互斥：两者都在回答「用哪把钥匙」。"
+            />
+          </template>
+          <el-input
+            v-model="form.accessKeyId"
+            :disabled="!staticCredentialsEnabled"
+            placeholder="例如 minioadmin"
+          />
+        </el-form-item>
+
+        <el-form-item>
+          <template #label>
+            <FieldLabel
+              label="secretAccessKey"
+              tip="只写不读：服务端从不回显该值（库内加密保存）。留空表示保持已保存的密钥不变。"
+            />
+          </template>
+          <el-input
+            v-model="form.secretAccessKey"
+            type="password"
+            show-password
+            :disabled="!staticCredentialsEnabled"
+            :placeholder="secretPlaceholder"
+          />
+        </el-form-item>
+
+        <el-form-item v-if="storedAccessKeyId && !form.removeCredentials">
+          <el-button size="small" text type="danger" @click="form.removeCredentials = true">
+            <el-icon><Delete /></el-icon>
+            <span class="pc-list-add">移除已保存的静态凭据</span>
+          </el-button>
+        </el-form-item>
+
+        <el-alert v-if="form.removeCredentials" type="info" :closable="false" show-icon class="pc-storage-carry">
+          <template #title>保存后将移除这个 catalog 的静态凭据</template>
+          <div>
+            之后该 catalog 会回到「服务端配置的密钥」这条路径（默认凭据 → 环境凭据链）。
+            <el-button size="small" text type="primary" @click="form.removeCredentials = false">取消移除</el-button>
+          </div>
+        </el-alert>
+      </template>
+
       <el-alert
         v-if="carriedKeys.length"
         type="info"
@@ -129,6 +178,18 @@ import FieldLabel from '@/components/FieldLabel.vue'
 
 /** 所有子类型共有的字段。 */
 const COMMON_KEYS = ['storageType', 'allowedLocations', 'storageName']
+
+/**
+ * 静态凭据的字段名，以及哪些存储类型有这对字段。
+ *
+ * <p>它们是服务端 `StorageConfigInfo` 的扩展字段（规格里没有「用户填 AK/SK」的位置），
+ * 语义与普通字段不同：`secretAccessKey` 只写不读，服务端从不回显，
+ * 因此这里单独处理，不走下面的 `TYPE_FIELDS` 那套「空值即删除」的通用规则——
+ * 对它来说「空」的含义是「保持不变」，见 `build()` 的说明。
+ */
+const STATIC_CREDENTIAL_KEYS = ['accessKeyId', 'secretAccessKey']
+
+const STATIC_CREDENTIAL_TYPES = ['S3', 'OBS', 'OSS']
 
 /**
  * 各存储类型的专属字段。`bool` 用开关，其余用输入框。
@@ -191,6 +252,13 @@ const props = defineProps({
   storageTypes: { type: Array, default: () => ['S3', 'GCS', 'AZURE', 'OBS', 'OSS', 'FILE'] },
   /** 本部署实际支持的存储类型 */
   supportedTypes: { type: Array, default: () => [] },
+  /**
+   * 本部署能否保存静态凭据（服务端是否配了加密密钥）。
+   *
+   * <p>默认 false 而不是 true：读不到元数据时（服务端旧版本、或连接未就绪）
+   * 乐观地放开输入，只会让用户填完再吃一个服务端 400。
+   */
+  staticCredentialsEnabled: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -198,16 +266,34 @@ const emit = defineEmits(['update:modelValue'])
 /** 表单不认识、但要原样带回服务端的字段。 */
 const carried = ref({})
 
+/** 服务端返回的 accessKeyId，用来判断「已保存了静态凭据」与是否更换了密钥 ID。 */
+const storedAccessKeyId = ref('')
+
 const form = reactive({
   storageType: '',
   allowedLocations: [],
   storageName: '',
   extras: {},
+  accessKeyId: '',
+  secretAccessKey: '',
+  /** 显式移除已保存的静态凭据（勾上则提交一对空串，见 build()）。 */
+  removeCredentials: false,
 })
+
+/** 当前类型是否承载静态凭据。 */
+const supportsStaticCredentials = computed(() => STATIC_CREDENTIAL_TYPES.includes(form.storageType))
+
+const secretPlaceholder = computed(() => (storedAccessKeyId.value
+  ? '已保存密钥，留空即保持不变'
+  : '仅填写时不回显，请确认无误'))
 
 /** 表单覆盖的键集合（按类型不同）。 */
 function knownKeys(type) {
-  return new Set([...COMMON_KEYS, ...(TYPE_FIELDS[type] || []).map((field) => field.key)])
+  const keys = new Set([...COMMON_KEYS, ...(TYPE_FIELDS[type] || []).map((field) => field.key)])
+  if (STATIC_CREDENTIAL_TYPES.includes(type)) {
+    STATIC_CREDENTIAL_KEYS.forEach((key) => keys.add(key))
+  }
+  return keys
 }
 
 /** 服务端返回的类型不在本控制台的类型表里时，保留原值并提示。 */
@@ -261,6 +347,13 @@ function adopt(source) {
   form.allowedLocations = [...(next.allowedLocations || [])]
   form.storageName = next.storageName || ''
   form.extras = collectExtras(next, type)
+  // 密钥只写不读，服务端不会回显：这里能拿到的只有 accessKeyId。
+  // 每次灌入都把它当成「当前已保存的值」，并清空输入框与移除标记。
+  const credentialTypes = STATIC_CREDENTIAL_TYPES.includes(type)
+  form.accessKeyId = credentialTypes ? (next.accessKeyId || '') : ''
+  form.secretAccessKey = ''
+  form.removeCredentials = false
+  storedAccessKeyId.value = form.accessKeyId
   carried.value = splitCarried(next, type)
 }
 
@@ -280,6 +373,12 @@ const locationPlaceholder = computed(() => ({
 /** 切换类型：只保留该类型的字段，避免把上一个类型的属性带到新配置里。 */
 function onTypeChange(next) {
   form.extras = collectExtras({}, next)
+  // 静态凭据同样不能跨类型沿用：AK/SK 是签发到具体云厂商的，
+  // 换成另一家的存储类型后旧密钥不但没用，还会让「这个 catalog 用哪把钥匙」变得难判断
+  form.accessKeyId = ''
+  form.secretAccessKey = ''
+  form.removeCredentials = false
+  storedAccessKeyId.value = ''
   carried.value = splitCarried(carried.value, next)
   push()
 }
@@ -289,7 +388,15 @@ function removeLocation(index) {
   push()
 }
 
-/** 收敛成服务端要的形状：丢掉空串与空数组，布尔值原样带上。 */
+/**
+ * 收敛成服务端要的形状：丢掉空串与空数组，布尔值原样带上。
+ *
+ * <p><b>静态凭据的三个分支对应服务端的三种语义</b>（见服务端 `StorageConfigs`
+ * 的 `mergeStaticCredentials`）：都填 = 设置、都为空串 = 清除、都不出现 = 保持不变。
+ * 因此这里空值不是「删除字段」那么简单——对密钥来说删掉字段意味着「保持」，
+ * 想清除必须显式提交一对空串，这也是「移除」要单独一个按钮而不是「清空输入框」的原因：
+ * 一个空的输入框同时可能是「我没动它」和「我要删掉它」，UI 上必须分得开。
+ */
 function build() {
   // 先铺开表单覆盖不到的字段，再覆盖已知键——顺序不能反，否则已知键会被旧值盖回
   const config = { ...carried.value }
@@ -317,6 +424,29 @@ function build() {
     } else {
       delete config[field.key]
     }
+  }
+
+  if (supportsStaticCredentials.value) {
+    const accessKeyId = (form.accessKeyId || '').trim()
+    const secretAccessKey = (form.secretAccessKey || '').trim()
+    if (form.removeCredentials) {
+      config.accessKeyId = ''
+      config.secretAccessKey = ''
+    } else {
+      if (accessKeyId) {
+        config.accessKeyId = accessKeyId
+      } else {
+        delete config.accessKeyId
+      }
+      // 密钥留空即「不提交该字段」，服务端会保持库中已保存的那一份
+      if (secretAccessKey) {
+        config.secretAccessKey = secretAccessKey
+      } else {
+        delete config.secretAccessKey
+      }
+    }
+  } else {
+    STATIC_CREDENTIAL_KEYS.forEach((key) => delete config[key])
   }
   return config
 }
@@ -369,6 +499,35 @@ function validate() {
   }
   if (form.storageType === 'AZURE' && !String(form.extras.tenantId || '').trim()) {
     return 'Azure 存储必须填写 tenantId'
+  }
+  const credentialIssue = validateCredentials()
+  if (credentialIssue) return credentialIssue
+  return ''
+}
+
+/**
+ * 静态凭据的前置校验。
+ *
+ * <p>两条规则与服务端一致，提前在这里拦一次是因为它们的可发现性太差：
+ * 密钥只写不读，用户看不到「服务端手上是什么」；而 storageName 与静态凭据
+ * 在表单里相隔很远，「保存失败」时用户很难把两者联系起来。
+ */
+function validateCredentials() {
+  if (!supportsStaticCredentials.value || form.removeCredentials) return ''
+  const accessKeyId = (form.accessKeyId || '').trim()
+  const secretAccessKey = (form.secretAccessKey || '').trim()
+  if (secretAccessKey && !accessKeyId) {
+    return '填写了 secretAccessKey，但 accessKeyId 为空'
+  }
+  if (accessKeyId && !secretAccessKey && accessKeyId !== storedAccessKeyId.value) {
+    return '更换 accessKeyId 时必须同时填写 secretAccessKey（服务端不回显密钥，无法沿用）'
+  }
+  if (accessKeyId && String(form.storageName || '').trim()) {
+    return '静态凭据与具名存储（storageName）互斥：两者都在指定用哪一组密钥，请只保留一种'
+  }
+  if (accessKeyId && !props.staticCredentialsEnabled) {
+    return '本部署未开启静态凭据（服务端未配置 paimon.rest.storage.credential-secret-key），'
+      + '请留空以使用服务端配置的密钥'
   }
   return ''
 }

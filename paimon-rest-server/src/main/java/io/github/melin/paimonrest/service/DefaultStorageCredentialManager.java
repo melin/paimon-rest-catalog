@@ -9,7 +9,9 @@ import io.github.melin.paimonrest.dto.StorageDtos.GcpStorageConfigInfo;
 import io.github.melin.paimonrest.dto.StorageDtos.HuaweiObsStorageConfigInfo;
 import io.github.melin.paimonrest.dto.StorageDtos.StorageConfigInfo;
 import io.github.melin.paimonrest.support.ApiException;
+import io.github.melin.paimonrest.support.CredentialCipher;
 import io.github.melin.paimonrest.support.CredentialManagerType;
+import io.github.melin.paimonrest.support.StorageConfigs;
 import io.github.melin.paimonrest.support.VendedStorageCredential;
 import java.security.SecureRandom;
 import java.time.Duration;
@@ -52,6 +54,13 @@ import org.springframework.stereotype.Component;
  * <p><b>{@code stsUnavailable} 的语义。</b>规格写的是「设为 true 时 Polaris 服务端
  * 不再为访问该 catalog 下发凭据」。这里照此执行：仍然下发定位配置（区域、端点），
  * 但不给密钥，由引擎用自己的身份访问。这是配置意图，不是失败。
+ *
+ * <p><b>catalog 自带的静态凭据是这一层的最高优先来源</b>，且排在
+ * {@code stsUnavailable} 之前——两者的判断依据与取舍写在
+ * {@link #s3} 的方法注释里。密钥在库中是密文，这里是唯一需要解密的消费点；
+ * 解密失败（换了加密密钥）直接 500，不退回服务端配置：退回等于把
+ * 「这个 catalog 该用哪把钥匙」从调用方明确指定降级成部署方默认，
+ * 而密钥无法解开的真实原因（配置变更）会因此被掩盖成「权限不对」。
  */
 @Component
 @RequiredArgsConstructor
@@ -97,6 +106,8 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
 
     private final RestServerProperties properties;
 
+    private final CredentialCipher cipher;
+
     private final SecureRandom random = new SecureRandom();
 
     @Override
@@ -132,13 +143,22 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
     // ------------------------------------------------------------------ S3
 
     /**
-     * S3：三级密钥来源，优先级为具名存储 → 默认配置 → 环境凭据链。
+     * S3：四级密钥来源，优先级为 catalog 静态凭据 → 具名存储 → 默认配置 → 环境凭据链。
      *
-     * <p>具名存储优先是必须的：catalog 显式写了 {@code storageName}，
+     * <p>具名存储优先于默认配置是必须的：catalog 显式写了 {@code storageName}，
      * 说明它要的是那一组密钥，而不是服务端的默认密钥。
      * 找不到该名字时直接失败（500），不退回默认凭据——
      * 退回会把「本来只能读 a 桶的身份」静默升级成「服务端默认身份」，
-     * 一个拼错的配置不该带来权限扩大。
+     * 一个拼错的配置不该带来权限扩大。静态凭据与 {@code storageName} 互斥，
+     * 由 {@link StorageConfigs#validate} 在写入口拒绝，所以两者不会真的一起出现。
+     *
+     * <p><b>静态凭据排在 {@code stsUnavailable} 之前。</b>{@code stsUnavailable}
+     * 表达的是「服务端不去向云申请临时凭据」（规格原文：不再为该 catalog 下发凭据），
+     * 而静态凭据是**建 catalog 的人自己填进这份配置的**，下发它既不是申请临时凭据，
+     * 也不涉及服务端的云侧信任关系。顺序反过来的后果是：兼容 S3 的对象存储
+     * （MinIO / Ceph / Ozone / FlashBlade）通常没有 STS，配置里会照惯例写上
+     * {@code stsUnavailable: true}，于是「填了密钥却收不到密钥」——
+     * 一个看起来像功能坏了的静默行为。
      */
     private String s3(AwsStorageConfigInfo s3, Map<String, String> token) {
         // 定位配置与密钥有无无关：即使不下发密钥，引擎也需要知道该连哪里
@@ -146,6 +166,12 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
         putIfPresent(token, "s3.endpoint", s3.endpoint());
         if (s3.pathStyleAccess() != null) {
             token.put("s3.path-style-access", s3.pathStyleAccess().toString());
+        }
+        StorageConfigs.StaticCredentials own = StorageConfigs.staticCredentials(s3, cipher);
+        if (own != null) {
+            token.put(KEY_S3_ACCESS, own.accessKeyId());
+            token.put(KEY_S3_SECRET, own.secretAccessKey());
+            return VendedStorageCredential.SOURCE_STATIC_CREDENTIALS;
         }
         if (Boolean.TRUE.equals(s3.stsUnavailable())) {
             return VendedStorageCredential.SOURCE_STS_UNAVAILABLE;
@@ -169,7 +195,7 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
     // ------------------------------------------------------------------ OBS / OSS
 
     /**
-     * 华为云 OBS：端点照发，密钥按三级来源取。
+     * 华为云 OBS：端点照发，密钥按四级来源取（catalog 静态凭据 → 具名 → 默认 → 环境）。
      *
      * <p>端点放在前面且不受密钥来源影响：即使服务端没有任何 OBS 凭据，
      * 引擎也需要知道连哪个端点——它可能用自己的 ECS 委托身份或
@@ -177,6 +203,11 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
      */
     private String obs(HuaweiObsStorageConfigInfo obs, Map<String, String> token) {
         putIfPresent(token, OBS_KEYS.endpoint(), obs.endpoint());
+        StorageConfigs.StaticCredentials own = StorageConfigs.staticCredentials(obs, cipher);
+        if (own != null) {
+            putSecrets(token, OBS_KEYS, own.accessKeyId(), own.secretAccessKey(), null);
+            return VendedStorageCredential.SOURCE_STATIC_CREDENTIALS;
+        }
         if (Boolean.TRUE.equals(obs.stsUnavailable())) {
             return VendedStorageCredential.SOURCE_STS_UNAVAILABLE;
         }
@@ -186,6 +217,11 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
     /** 阿里云 OSS：处理与 {@link #obs} 相同，只是键名族换成 {@link #OSS_KEYS}。 */
     private String oss(AliyunOssStorageConfigInfo oss, Map<String, String> token) {
         putIfPresent(token, OSS_KEYS.endpoint(), oss.endpoint());
+        StorageConfigs.StaticCredentials own = StorageConfigs.staticCredentials(oss, cipher);
+        if (own != null) {
+            putSecrets(token, OSS_KEYS, own.accessKeyId(), own.secretAccessKey(), null);
+            return VendedStorageCredential.SOURCE_STATIC_CREDENTIALS;
+        }
         if (Boolean.TRUE.equals(oss.stsUnavailable())) {
             return VendedStorageCredential.SOURCE_STS_UNAVAILABLE;
         }
@@ -196,6 +232,8 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
      * OBS / OSS 共用的三级凭据来源：具名存储 → 默认配置 → 环境凭据链。
      *
      * <p>与 S3 同构，包括「具名存储找不到时失败而非退回默认」这条取舍。
+     * 静态凭据那一级不在这里：它在调用点先于 {@code stsUnavailable} 处理，
+     * 而本方法只管服务端配置面。
      *
      * <p>临时凭据（{@code sessionToken}）跟着它所属的那一级一起下发：具名存储里配了
      * 令牌就用那个，否则用默认配置的。混搭（具名存储的 AK/SK 配默认配置的令牌）

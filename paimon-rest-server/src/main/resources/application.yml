@@ -217,6 +217,7 @@ paimon:
       connection-max-idle-time: 5m
       connection-time-to-live: 30m
       expect-continue-enabled: true
+      credential-secret-key: mVPu1SDrF2tyq6mIBILyy/0STBS+gUiTcyMQkEEGiX0=
     storage-credential-cache:
       # 已下发凭据的复用上限；条目按各自过期时间失效，这个值只兜住内存占用
       max-entries: 10000

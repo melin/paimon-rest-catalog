@@ -19,6 +19,7 @@ import io.github.melin.paimonrest.dto.ManagementEnums.StorageType;
 import io.github.melin.paimonrest.dto.Privilege;
 import io.github.melin.paimonrest.dto.StorageDtos.StorageConfigInfo;
 import io.github.melin.paimonrest.support.ApiException;
+import io.github.melin.paimonrest.support.CredentialCipher;
 import io.github.melin.paimonrest.support.Paging;
 import io.github.melin.paimonrest.support.ResourceType;
 import io.github.melin.paimonrest.support.StorageConfigs;
@@ -45,6 +46,11 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>仓库位置取自 {@code allowedLocations} 的首项（{@link StorageConfigs#warehouseOf}）：
  * 表路径模板要用它拼路径，所以即使调用方没给位置，也会补上配置里的默认仓库。
+ *
+ * <p><b>静态凭据由本服务收口。</b>写路径在落库前把明文密钥密封（{@link CredentialCipher}），
+ * 读路径在返回前抹掉密文（{@link StorageConfigs#withoutSecrets}）——
+ * 一写一读都经过这里，是因为 catalog 的读写只在这一个服务上；
+ * 两个方向各留一处，脱敏就不会漏在别的装配点上。
  */
 @Service
 @RequiredArgsConstructor
@@ -61,6 +67,7 @@ public class ManagementCatalogService {
     private final DatabaseService databaseService;
     private final RestServerProperties properties;
     private final StorageRuntimePolicy storagePolicy;
+    private final CredentialCipher cipher;
 
     /** {@code GET /catalogs}。 */
     @Transactional(readOnly = true)
@@ -96,7 +103,7 @@ public class ManagementCatalogService {
         entity.setId(Paging.newId());
         entity.setPrefix(name);
         entity.setCatalogType(type);
-        applyStorage(entity, inbound.storageConfigInfo());
+        applyStorage(entity, inbound.storageConfigInfo(), null);
         entity.setProperties(inbound.properties() == null
                 ? new LinkedHashMap<>() : new LinkedHashMap<>(inbound.properties()));
         entity.setDefaults(new LinkedHashMap<>());
@@ -131,7 +138,7 @@ public class ManagementCatalogService {
             entity.setProperties(new LinkedHashMap<>(request.properties()));
         }
         if (request.storageConfigInfo() != null) {
-            applyStorage(entity, request.storageConfigInfo());
+            applyStorage(entity, request.storageConfigInfo(), StorageConfigs.of(entity));
         }
         entity.setEntityVersion(entity.getEntityVersion() + 1);
         entity.touch(RequestContext.principal(), RequestContext.now());
@@ -182,7 +189,7 @@ public class ManagementCatalogService {
                 entity.getCreatedAt(),
                 entity.getUpdatedAt(),
                 entity.getEntityVersion(),
-                StorageConfigs.of(entity));
+                StorageConfigs.withoutSecrets(StorageConfigs.of(entity)));
     }
 
     /**
@@ -190,17 +197,22 @@ public class ManagementCatalogService {
      *
      * <p>调用方没给 {@code storageConfigInfo} 时按 {@code FILE} 处理、位置退回默认仓库，
      * 与 feature 上线前的行为一致。落库细节见 {@link StorageConfigs#apply}。
+     *
+     * @param existing 库中已有的配置，新建时为 {@code null}。只有静态凭据的合并需要它：
+     *                 密钥只写不读，请求里省略时必须从旧值继承（见
+     *                 {@link StorageConfigs#mergeStaticCredentials}）
      */
-    private void applyStorage(CatalogEntity entity, StorageConfigInfo requested) {
+    private void applyStorage(CatalogEntity entity, StorageConfigInfo requested, StorageConfigInfo existing) {
         StorageConfigInfo supplied = requested == null
                 ? StorageConfigs.blank(StorageType.FILE, new ArrayList<>())
                 : requested;
         StorageConfigInfo normalized = StorageConfigs.normalize(supplied, properties.getDefaultWarehouse());
-        StorageConfigs.validate(normalized);
+        StorageConfigInfo merged = StorageConfigs.mergeStaticCredentials(normalized, existing, cipher);
+        StorageConfigs.validate(merged);
         // 存储类型是否可用是本部署的能力问题（装了哪个 FileIO），
         // 与配置本身是否合法是两件事，因此分两步校验、分开报错
-        storagePolicy.requireSupported(normalized.storageType(), entity.getPrefix());
-        StorageConfigs.apply(entity, normalized);
+        storagePolicy.requireSupported(merged.storageType(), entity.getPrefix());
+        StorageConfigs.apply(entity, merged);
     }
 
     /**

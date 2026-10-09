@@ -480,6 +480,21 @@ public class RestServerProperties {
         /** 阿里云 OSS 凭据，结构与 {@link #obs} 相同。 */
         private final CloudCredentials oss = new CloudCredentials();
 
+        /**
+         * 静态凭据的落库加密密钥：base64 的 32 字节（AES-256），可用
+         * {@code openssl rand -base64 32} 生成。
+         *
+         * <p>它保护的是 catalog 存储配置里由**使用者自己填写**的对象存储长期密钥
+         * （{@code storageConfigInfo.accessKeyId} / {@code secretAccessKey}）——
+         * 那种密钥要原样下发给引擎，服务端必须能还原明文，因此只能加密而不能摘要。
+         * 密文形态与失效行为见 {@code CredentialCipher}。
+         *
+         * <p><b>留空时本功能关闭</b>：管理 API 拒绝保存带静态凭据的 catalog
+         * （400，错误信息里给出生成命令），其余功能完全不受影响。
+         * 取值非法（不是 base64、或解出来不是 32 字节）属于配置错误，启动即失败。
+         */
+        private String credentialSecretKey;
+
         /** STS 客户端缓存上限，对应 Polaris 的 {@code polaris.storage.clients-cache-max-size}。 */
         @Min(1)
         private Integer clientsCacheMaxSize;
@@ -525,9 +540,10 @@ public class RestServerProperties {
              * 具名存储的凭据，键为 {@code StorageConfigInfo.storageName}。
              *
              * <p>Polaris 用它支持「一个服务托管多组 S3 凭据」：catalog 只引用一个名字，
-             * 密钥留在服务端配置里，不出现在管理 API 的报文中。这也是本项目里
-             * 唯一能让密钥不落库的途径——{@code storageConfigInfo} 是整份存进
-             * {@code storage_config_json} 的。
+             * 密钥留在服务端配置里，不出现在管理 API 的报文中。这也是**密钥完全不落库**
+             * 的唯一途径——另一种做法（{@code storageConfigInfo} 里的静态凭据）
+             * 密钥仍然写进 {@code storage_config_json}，只是以
+             * {@code paimon.rest.storage.credential-secret-key} 加密后的形态落库。
              */
             private Map<String, Keys> storages = new LinkedHashMap<>();
         }

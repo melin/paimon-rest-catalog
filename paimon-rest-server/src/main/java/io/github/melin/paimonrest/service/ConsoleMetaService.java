@@ -6,6 +6,7 @@ import io.github.melin.paimonrest.dto.ManagementEnums.CatalogType;
 import io.github.melin.paimonrest.dto.ManagementEnums.GrantType;
 import io.github.melin.paimonrest.dto.ManagementEnums.StorageType;
 import io.github.melin.paimonrest.dto.Privilege;
+import io.github.melin.paimonrest.support.CredentialCipher;
 import io.github.melin.paimonrest.support.CredentialManagerType;
 import io.github.melin.paimonrest.support.FileIoType;
 import java.util.ArrayList;
@@ -32,6 +33,8 @@ public class ConsoleMetaService {
     private static final String DEVELOPMENT_VERSION = "development";
 
     private final RestServerProperties properties;
+
+    private final CredentialCipher cipher;
 
     @Value("${spring.application.name:paimon-rest-server}")
     private String applicationName;
@@ -101,6 +104,7 @@ public class ConsoleMetaService {
                 names(CatalogType.values()),
                 names(StorageType.values()),
                 supported,
+                cipher.available(),
                 Arrays.stream(CredentialManagerType.values()).map(CredentialManagerType::wireName).toList(),
                 List.copyOf(FileIoType.wireNames()),
                 Arrays.stream(GrantType.values()).map(GrantType::wireName).toList(),

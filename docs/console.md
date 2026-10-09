@@ -166,12 +166,32 @@ paimon-rest-console/
 - `supportedStorageTypes`：本部署实际可用的存储类型子集（由 `file-io.type` 决定）。
   控制台把不可用项渲染成**禁用**而不是隐藏——看到「有 OBS 这个类型但当前部署没开」
   比看不到要好。
+- `staticCredentialsEnabled`：本部署是否允许 catalog 自带静态凭据（由
+  `storage.credential-secret-key` 是否配上决定），见 4.4。
 - `grantTypes` 与 `privilegesByGrantType`：资源类型 → 该层级可授予的权限。
   这份对应关系由服务端的 `Privilege.allowedFor(String)` 从管理规格还原。
   前端若复制一份必然漂移，而漂移的表现是「提交后才被服务端拒绝」，排查成本高。
 
 meta 只暴露枚举取值与服务端自身的配置，不含任何主体、catalog 或凭据信息，
 因此与 `/api/management/v1/**` 一样只过认证拦截器，不做细粒度授权判定。
+
+### 4.4 存储配置表单里的静态凭据
+
+创建 / 编辑 catalog 时的存储配置（`components/StorageConfigFields.vue`）在
+`S3` / `OBS` / `OSS` 三种类型下多出一组「静态凭据」：`accessKeyId` 与
+`secretAccessKey`（密码框，可切换显示）。它是本工程在规格之外的扩展，语义与边界见
+[`README.md` 的存储与凭据一节](../README.md#5-配置项)，这里只说表单侧的做法：
+
+- **是否渲染由 `staticCredentialsEnabled` 决定**（即服务端有没有配 `credential-secret-key`）。
+  取不到 meta 时按 `false` 处理——宁可少一个字段，也不要让用户填完才被 400 拒绝。
+- **能力关着时不把字段藏起来**，而是在原位说明该开哪个配置项、以及生成密钥的命令
+  （`openssl rand -base64 32`）。藏起来的后果是「别人告诉我这个功能存在，但我这儿看不到」。
+- **编辑已有 catalog 时密钥框留空**，placeholder 显示服务端回显的 `accessKeyId`，
+  意思是「已配的是这把钥匙，留空就保持」。这与 `PUT` 的「省略即保持」例外一一对应；
+  提交时留空则这个键根本不进请求体。
+- **「移除已保存的静态凭据」按钮**提交一对空串（二次确认），之后下发退回服务端配置那一级。
+- **前端先拦一遍**同样的四条规则：有密钥没 ID、换 ID 不带新密钥、与 `storageName` 互斥、
+  能力未开启。理由与下拉候选来源一致：服务端只会回一句笼统的 400，而这一层能说清是哪一条。
 
 ---
 
@@ -203,7 +223,7 @@ python3 scripts/verify-console.py      # 退出码 0 通过 / 1 不一致 / 2 �
 PYTHON=/path/to/python3 scripts/verify-console.py   # 多解释器时指定装了 PyYAML 的那个
 ```
 
-它**不构建前端、不启动服务端**，只做静态比对，因此可以放进提交前的检查。10 组 21 项：
+它**不构建前端、不启动服务端**，只做静态比对，因此可以放进提交前的检查。11 组 28 项：
 
 | 组 | 校验内容 |
 | --- | --- |
@@ -217,6 +237,7 @@ PYTHON=/path/to/python3 scripts/verify-console.py   # 多解释器时指定装�
 | 8. 变更构造器 | 表详情的变更构造器能提交的动作都在规格的 `SchemaChange` 里，且每个动作提交的字段都在该动作的 schema 里有定义 |
 | 9. 对话框状态 | 每个 `el-dialog` 都声明了 `destroy-on-close`（否则编辑时会残留上一次的状态） |
 | 10. 下拉候选来源 | 每个 `el-select` 都声明了候选来源（`el-option` / `:options` 等）；确属自由输入的要在源码里写 `el-select-free-input` 标记显式豁免（否则「下拉是空的」这类 bug 只有打开页面才看得到） |
+| 11. 静态凭据 | catalog 自带 AK/SK 这条链路横跨四个文件（服务端 DTO 的字段名、`supportsStaticCredentials` 认可的类型、meta 里的能力开关、前端表单），逐处对齐：字段名与三种类型的 record 参数逐字一致、类型集合两侧一致、**规格里确实没有这两个字段**（否则不再是扩展，要先对齐语义）、能力开关从 meta 一路传到表单 prop、能力关着时给的是可操作提示而不是把字段藏起来、读路径仍做脱敏 |
 
 第 7 组是这套机制里最实用的一条：**产物过期不会让任何东西报错**，
 它只是安静地少一个按钮。
