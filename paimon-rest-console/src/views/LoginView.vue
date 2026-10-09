@@ -59,18 +59,6 @@
         <!-- 这三种方式以上都是「服务端要求令牌」，只有一种例外：门禁开着而整体鉴权关着。
              那句话必须出现在登录页上——少了它，「要求登录」会被读成
              「本服务端已受保护」，而 curl 一个数据接口就能证明不是 -->
-        <el-alert v-if="auth.gateOnly()" type="info" :closable="false" show-icon class="pc-login-alert">
-          <template #title>这层登录只挡住界面</template>
-          <div>
-            服务端开启了 <code class="pc-mono">paimon.rest.auth.console.required</code>，
-            而 <code class="pc-mono">paimon.rest.auth.enabled=false</code>：
-            必须登录才能打开本控制台，但 <code class="pc-mono">/v1/**</code>
-            与管理 API 仍然匿名可调。<strong>它不是安全边界</strong>——
-            要保护数据，请把 <code class="pc-mono">auth.enabled</code> 设为
-            <code class="pc-mono">true</code>。
-          </div>
-        </el-alert>
-
         <!-- 登录方式由服务端下发，页签按服务端给的顺序排。只有一种时不渲染页签头 -->
         <el-tabs v-if="tabs.length > 1" v-model="activeTab" class="pc-login-tabs">
           <el-tab-pane
@@ -136,15 +124,6 @@
           >
             登录
           </el-button>
-
-          <p class="pc-login-foot">
-            账号来自服务端配置（<code class="pc-mono">paimon.rest.auth.console.password.users</code>，
-            默认 <code class="pc-mono">admin/admin</code>），不是主体表里的凭据——
-            它只回答「谁能打开控制台」，进来之后能做什么仍由主体角色授权决定。<br />
-            服务端对所有失败一律回 <code class="pc-mono">invalid username or password</code>，
-            不区分用户名与密码，这是刻意的（防止枚举用户名）。<br />
-            登录后令牌保存在本机浏览器，{{ ttlText }}后失效。
-          </p>
         </template>
 
         <!-- 方式二：OAuth 2.0 客户端凭据 -->
@@ -188,13 +167,6 @@
           >
             登录
           </el-button>
-
-          <p class="pc-login-foot">
-            凭据来自主体表（<code class="pc-mono">paimon_principal</code>），与 Spark / Flink
-            客户端调用本服务端用的是同一份。登录后令牌保存在本机浏览器，{{ ttlText }}后失效。<br />
-            换回的是服务端签发的访问令牌，不是会话——服务端不保存登录状态，
-            因此「退出登录」只是忘掉本机令牌。
-          </p>
         </template>
 
         <!-- 方式三：OpenID Connect 授权码 + PKCE -->
@@ -233,16 +205,6 @@
 
         <!-- 降级入口：直接填一个静态令牌 -->
         <template v-else-if="activeTab === 'static-token'">
-          <el-alert type="warning" :closable="false" show-icon class="pc-login-alert">
-            <template #title>这是给脚本准备的降级入口</template>
-            <div>
-              需要自行到服务端 <code class="pc-mono">paimon.rest.auth.tokens</code>
-              里取值。没有主体名，令牌本身就是主体名（除非配了
-              <code class="pc-mono">token-principals</code> 映射）——
-              换个人用就得改服务端配置，因此浏览器上更推荐上面三种方式。
-            </div>
-          </el-alert>
-
           <el-form label-position="top" class="pc-login-form" @submit.prevent>
             <el-form-item label="访问令牌">
               <el-input
