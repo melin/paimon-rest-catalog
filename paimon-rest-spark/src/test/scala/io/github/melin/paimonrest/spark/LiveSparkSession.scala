@@ -74,7 +74,7 @@ object LiveSparkSession {
      * `spark.sql.extensions` 里有没有它，缺了就直接抛异常、连建库都做不了
      * （提示语是 "When using Paimon, it is necessary to configure `spark.sql.extensions`…"）。
      */
-    private val extensions = PaimonRestManagement.EXTENSION_CLASS + "," + PaimonExtensionClass
+    val extensions = PaimonRestManagement.EXTENSION_CLASS + "," + PaimonExtensionClass
 
     /**
      * 测试用的 catalog 标识，既是 `spark.sql.catalog.<name>` 的后缀，
@@ -85,7 +85,7 @@ object LiveSparkSession {
      * `spark_catalog` 里，之后 `INSERT` 会以「paimon is not a valid Spark SQL Data Source」
      * 收场——报错信息与真正的原因相去甚远。
      */
-    val catalog: String = "paimon"
+    val catalog: String = "paimon_catalog"
 
     /** 会话按进程共享，只建一次。仅在有目标地址时才被触碰。 */
     lazy val instance: SparkSession = {

@@ -68,6 +68,15 @@
    Spark 3.5 的 `SqlBase.g4` 没有兜底分支，所以本模块自带一份只描述管理语句的小语法，
    「能否整句匹配到 EOF」成功才接管，失败原样交回原生解析器。
    所以 **管理语句的识别依据是语法，不是字符串前缀**。
+9. **Spark 模块里被 Scala 引用的 Java 类型不能写成 `record`。**
+   IDE 的混合编译会让 scalac 直接解析 Java 源码提取签名，而 Scala 2.12 的 Java 源码
+   解析器不认识 `record` 关键字——这些类型在 IDE 里整体消失，报
+   `value X is not a member of object ...`，连带 lambda 报 `missing parameter type`；
+   Maven 不受影响（`sendJavaToScalac=false`，scalac 读的是 javac 产出的 class 文件），
+   于是表现为「Maven 绿、IDE 红」。被 Scala 摸到（**按名字或靠返回值推断都算**）的类型
+   一律写普通静态嵌套类，见 `ManagementApiClient` 里五个摘要类型与其上方的成段注释。
+   判断是否「被摸到」别只搜类型名：`client.listCatalogs().asScala.map { catalog => catalog.name() }`
+   这种推断用法同样依赖该类型可解析。
 
 ---
 

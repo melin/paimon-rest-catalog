@@ -17,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
@@ -441,23 +442,222 @@ public final class ManagementApiClient {
 
     // ------------------------------------------------------------------ 内部：形状转换
 
+    /*
+     * 下面五个摘要类型刻意写成普通静态嵌套类，而不是 {@code record}。
+     *
+     * 它们会被 Scala 侧引用——{@code ManagementAstBuilder} / {@code ManagementCommands}
+     * 按名字引用 {@code GrantInfo}，其余几个靠方法返回值推断后调用访问器。IDE 的
+     * 混合编译会让 scalac 直接解析 Java 源码提取签名，而 Scala 2.12 的 Java 源码
+     * 解析器不认识 {@code record} 关键字，于是这些类型在 IDE 里整体消失：
+     * 报「not a member of object」，连带 lambda 报「missing parameter type」。
+     * Maven 构建不受影响（POM 里 {@code sendJavaToScalac=false}，scalac 读的是
+     * javac 产出的 class 文件），但 IDE 与 Maven 必须同时是绿的，因此只能写普通类。
+     * 访问器沿用 record 的方法名（{@code name()} 而非 {@code getName()}），
+     * 调用点因此一行不用改；equals/hashCode/toString 手写，保持 record 的值语义。
+     */
+
     /** 主体摘要。{@code clientSecret} 不在此模型内，明文密钥只经 {@link Credentials} 返回一次。 */
-    public record PrincipalInfo(String name, String clientId, Map<String, String> properties,
-                                Integer entityVersion) {
+    public static final class PrincipalInfo {
+
+        private final String name;
+        private final String clientId;
+        private final Map<String, String> properties;
+        private final Integer entityVersion;
+
+        public PrincipalInfo(String name, String clientId, Map<String, String> properties,
+                             Integer entityVersion) {
+            this.name = name;
+            this.clientId = clientId;
+            this.properties = properties;
+            this.entityVersion = entityVersion;
+        }
+
+        public String name() {
+            return name;
+        }
+
+        public String clientId() {
+            return clientId;
+        }
+
+        public Map<String, String> properties() {
+            return properties;
+        }
+
+        public Integer entityVersion() {
+            return entityVersion;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof PrincipalInfo other
+                    && Objects.equals(name, other.name)
+                    && Objects.equals(clientId, other.clientId)
+                    && Objects.equals(properties, other.properties)
+                    && Objects.equals(entityVersion, other.entityVersion);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, clientId, properties, entityVersion);
+        }
+
+        @Override
+        public String toString() {
+            return "PrincipalInfo[name=" + name + ", clientId=" + clientId
+                    + ", properties=" + properties + ", entityVersion=" + entityVersion + "]";
+        }
     }
 
     /** 角色摘要：principal role 与 catalog role 的公共形状。 */
-    public record RoleInfo(String name, Map<String, String> properties, Boolean federated,
-                           Integer entityVersion) {
+    public static final class RoleInfo {
+
+        private final String name;
+        private final Map<String, String> properties;
+        private final Boolean federated;
+        private final Integer entityVersion;
+
+        public RoleInfo(String name, Map<String, String> properties, Boolean federated,
+                        Integer entityVersion) {
+            this.name = name;
+            this.properties = properties;
+            this.federated = federated;
+            this.entityVersion = entityVersion;
+        }
+
+        public String name() {
+            return name;
+        }
+
+        public Map<String, String> properties() {
+            return properties;
+        }
+
+        public Boolean federated() {
+            return federated;
+        }
+
+        public Integer entityVersion() {
+            return entityVersion;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof RoleInfo other
+                    && Objects.equals(name, other.name)
+                    && Objects.equals(properties, other.properties)
+                    && Objects.equals(federated, other.federated)
+                    && Objects.equals(entityVersion, other.entityVersion);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, properties, federated, entityVersion);
+        }
+
+        @Override
+        public String toString() {
+            return "RoleInfo[name=" + name + ", properties=" + properties
+                    + ", federated=" + federated + ", entityVersion=" + entityVersion + "]";
+        }
     }
 
     /** catalog 摘要。 */
-    public record CatalogInfo(String name, String type, Map<String, String> properties,
-                              Integer entityVersion) {
+    public static final class CatalogInfo {
+
+        private final String name;
+        private final String type;
+        private final Map<String, String> properties;
+        private final Integer entityVersion;
+
+        public CatalogInfo(String name, String type, Map<String, String> properties,
+                           Integer entityVersion) {
+            this.name = name;
+            this.type = type;
+            this.properties = properties;
+            this.entityVersion = entityVersion;
+        }
+
+        public String name() {
+            return name;
+        }
+
+        public String type() {
+            return type;
+        }
+
+        public Map<String, String> properties() {
+            return properties;
+        }
+
+        public Integer entityVersion() {
+            return entityVersion;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof CatalogInfo other
+                    && Objects.equals(name, other.name)
+                    && Objects.equals(type, other.type)
+                    && Objects.equals(properties, other.properties)
+                    && Objects.equals(entityVersion, other.entityVersion);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, type, properties, entityVersion);
+        }
+
+        @Override
+        public String toString() {
+            return "CatalogInfo[name=" + name + ", type=" + type
+                    + ", properties=" + properties + ", entityVersion=" + entityVersion + "]";
+        }
     }
 
     /** 创建 / 重置 / 轮换主体时一次性返回的凭据。 */
-    public record Credentials(String name, String clientId, String clientSecret) {
+    public static final class Credentials {
+
+        private final String name;
+        private final String clientId;
+        private final String clientSecret;
+
+        public Credentials(String name, String clientId, String clientSecret) {
+            this.name = name;
+            this.clientId = clientId;
+            this.clientSecret = clientSecret;
+        }
+
+        public String name() {
+            return name;
+        }
+
+        public String clientId() {
+            return clientId;
+        }
+
+        public String clientSecret() {
+            return clientSecret;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Credentials other
+                    && Objects.equals(name, other.name)
+                    && Objects.equals(clientId, other.clientId)
+                    && Objects.equals(clientSecret, other.clientSecret);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, clientId, clientSecret);
+        }
+
+        @Override
+        public String toString() {
+            // clientSecret 是一次性明文，不进日志与诊断输出
+            return "Credentials[name=" + name + ", clientId=" + clientId + "]";
+        }
     }
 
     /**
@@ -469,8 +669,36 @@ public final class ManagementApiClient {
      * @param objectName 对象名；catalog 与 namespace 类型为 {@code null}
      * @param privilege 权限取值
      */
-    public record GrantInfo(String type, List<String> namespace, String objectName,
-                            String privilege) {
+    public static final class GrantInfo {
+
+        private final String type;
+        private final List<String> namespace;
+        private final String objectName;
+        private final String privilege;
+
+        public GrantInfo(String type, List<String> namespace, String objectName,
+                         String privilege) {
+            this.type = type;
+            this.namespace = namespace == null ? List.of() : namespace;
+            this.objectName = objectName;
+            this.privilege = privilege;
+        }
+
+        public String type() {
+            return type;
+        }
+
+        public List<String> namespace() {
+            return namespace;
+        }
+
+        public String objectName() {
+            return objectName;
+        }
+
+        public String privilege() {
+            return privilege;
+        }
 
         /** catalog 级授权。 */
         public static GrantInfo onCatalog(String privilege) {
@@ -497,6 +725,26 @@ public final class ManagementApiClient {
                 case "semantic-model" -> "semanticModelName";
                 default -> null;
             };
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof GrantInfo other
+                    && Objects.equals(type, other.type)
+                    && Objects.equals(namespace, other.namespace)
+                    && Objects.equals(objectName, other.objectName)
+                    && Objects.equals(privilege, other.privilege);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(type, namespace, objectName, privilege);
+        }
+
+        @Override
+        public String toString() {
+            return "GrantInfo[type=" + type + ", namespace=" + namespace
+                    + ", objectName=" + objectName + ", privilege=" + privilege + "]";
         }
     }
 
