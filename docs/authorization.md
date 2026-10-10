@@ -263,7 +263,19 @@ curl -s -X POST -H "Authorization: Bearer etl-token" -H "$J" \
 # -> 403：reader 只有 NAMESPACE_LIST，没有 NAMESPACE_CREATE
 ```
 
-用 Spark SQL 完成同样的操作见 `docs/spark-sql-extension.md`。
+用 Spark SQL 管理语句完成同样的装配见 `docs/spark-sql-extension.md` 与 `docs/spark-sql-reference.md` 第 8 节。
+
+### 5.1 从引擎侧验一遍：两个身份跑真 SQL
+
+上面的 curl 验的是**服务端自己的判定**。同一件事在引擎侧还有一层要验：请求是 Paimon 的
+`SparkCatalog` 发出来的，403 会不会被客户端改写成别的错、被拒绝的写入有没有落数据，
+只有真 SQL 才知道。`SparkSqlAuthorizationTests` 做的就是这件事——同一个 catalog、同一张表，
+令牌 `alice` 建库建表加读写，令牌 `bob` 只能读，且断言拒绝报文点名了**缺失的那一项权限**
+（`TABLE_CREATE` / `TABLE_WRITE_DATA` / `NAMESPACE_CREATE`）、被拒之后数据没变。
+
+跑法与所需的两个令牌见 `docs/spark-paimon-rest-e2e.md` §6.1。两个身份共用一份 SparkContext、
+只换 `spark.sql.catalog.<catalog>.token`；另外只读身份也必须有 `NAMESPACE_READ_PROPERTIES`
+——`SparkCatalog` 懒加载时会去读默认命名空间 `default` 的属性，这不是「读数据」的权限。
 
 ---
 

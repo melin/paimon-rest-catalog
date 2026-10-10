@@ -11,13 +11,16 @@
 #   KEEP=1 ./scripts/e2e-spark-sql.sh       # 保留服务端不退出，便于手工继续调试
 #
 # 前置：
-#   - 已执行过 ./mvnw -o install -DskipTests（需要 paimon-rest-server 的 jar）
+#   - 已执行过 mvn -o install -DskipTests（需要 paimon-rest-server 的 jar）
 #
 # 说明：
 #   - 服务端用内存 H2（显式指定 h2 profile，因为默认数据源已是 MySQL），
 #     关闭即丢数据，因此脚本不依赖已有状态，也不要求本机有 MySQL；
 #   - 令牌 root 即服务端配置里的服务管理员主体名（令牌未配置映射时退化为「令牌即主体名」）；
-#   - 令牌 limited 经 token-principals 映射到主体 e2e_limited，用于验证授权确实被强制。
+#   - 令牌 limited 经 token-principals 映射到主体 e2e_limited，用于验证授权确实被强制；
+#   - 令牌 alice / bob 映射到 e2e_alice / e2e_bob，供 SparkSqlAuthorizationTests 用同一个
+#     catalog 扮演两个身份：e2e_alice 建库建表 + 读写，e2e_bob 只能读。
+#     少了这两个令牌，那一类用例会以「服务端不认识这个身份」的报文失败。
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -26,11 +29,12 @@ BASE=http://127.0.0.1:$PORT
 JAR=$ROOT/paimon-rest-server/target/paimon-rest-server-0.0.1-SNAPSHOT.jar
 LOG=$(mktemp -t paimon-rest-e2e.XXXXXX.log)
 export JAVA_HOME=${JAVA_HOME:-/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home}
-MVNW=$ROOT/mvnw
+# 本仓库没有 Maven Wrapper（见 AGENTS.md §1），一律用系统 mvn（3.9+）
+MVN=${MVN:-mvn}
 
 if [ ! -f "$JAR" ]; then
   echo "缺少服务端 jar：$JAR"
-  echo "请先执行：./mvnw -o install -DskipTests"
+  echo "请先执行：mvn -o install -DskipTests"
   exit 1
 fi
 
@@ -43,6 +47,10 @@ echo "== 启动服务端（端口 ${PORT}，日志 ${LOG}） =="
   --paimon.rest.auth.tokens[0]=root \
   --paimon.rest.auth.tokens[1]=limited \
   --paimon.rest.auth.token-principals.limited=e2e_limited \
+  --paimon.rest.auth.tokens[2]=alice \
+  --paimon.rest.auth.tokens[3]=bob \
+  --paimon.rest.auth.token-principals.alice=e2e_alice \
+  --paimon.rest.auth.token-principals.bob=e2e_bob \
   --paimon.rest.authorization.enabled=true \
   --paimon.rest.authorization.service-admins[0]=root \
   --paimon.rest.authorization.bootstrap-principal=root \
@@ -101,16 +109,18 @@ if [ -z "${DOC_VERIFIED:-}" ]; then
 fi
 
 echo "== 跑 Spark SQL 端到端验收 =="
-# 这三个类必须同批运行：一个 JVM 只能有一个 SparkContext，而
+# 这四个类必须同批运行：一个 JVM 只能有一个 SparkContext，而
 # spark.sql.extensions 只在建会话时生效，因此它们共用 LiveSparkSession 的会话。
 # 若把 ManagementSqlExecutionTests（用桩服务端、自建会话）也拉进来，
 # 先建的那个会话会被复用，端点与扩展都会错位——LiveSparkSession 会就此报错。
-#   ManagementSqlLiveServerTests  : 逐条语句对真实服务端验管理 API 契约
-#   PaimonTableDdlTests           : 用 Spark SQL 通过 REST catalog 建 Paimon 表，
-#                                   并核对落到服务端的 schema / 分区 / 表选项 / 路径
-#   SparkSqlDocExamplesTests      : 执行参考文档第 11 节的示例，防止示例被改坏
-"$MVNW" -o -pl paimon-rest-spark test \
-  -Dtest=ManagementSqlLiveServerTests,PaimonTableDdlTests,SparkSqlDocExamplesTests \
+#   ManagementSqlLiveServerTests    : 逐条语句对真实服务端验管理 API 契约
+#   PaimonTableDdlTests             : 用 Spark SQL 通过 REST catalog 建 Paimon 表，
+#                                     并核对落到服务端的 schema / 分区 / 表选项 / 路径
+#   SparkSqlAuthorizationTests      : 同一个 catalog、两种身份（令牌 alice / bob），
+#                                     验建库建表读写放行、只读身份的关键操作被 403 拒绝
+#   SparkSqlDocExamplesTests        : 执行参考文档第 11 节的示例，防止示例被改坏
+"$MVN" -o -pl paimon-rest-spark test \
+  -Dtest=ManagementSqlLiveServerTests,PaimonTableDdlTests,SparkSqlAuthorizationTests,SparkSqlDocExamplesTests \
   -DfailIfNoTests=false \
   -De2e.management.url="$BASE/api/management/v1" \
   -De2e.management.token=root

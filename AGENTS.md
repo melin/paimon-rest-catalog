@@ -91,7 +91,7 @@ open http://127.0.0.1:8080/console/        # 默认账号密码 admin/admin
 # ---- 端到端验收（都要先有一个运行中的实例）----
 BASE=http://127.0.0.1:8080 ./scripts/api-sweep.sh            # Catalog API 全部 60 个 operation
 BASE=http://127.0.0.1:8080 ./scripts/management-sweep.sh     # Management API 全部 33 个 operation
-./scripts/e2e-spark-sql.sh                                   # 自起 h2 实例，跑 Spark 三件套
+./scripts/e2e-spark-sql.sh                                   # 自起 h2 实例，跑 Spark 四件套
 BASE=... CLIENT_ID=... CLIENT_SECRET=... STATIC_TOKEN=... ./scripts/sweep-console-auth.sh
 cd paimon-rest-console && BASE=... CLIENT_ID=... CLIENT_SECRET=... npm run check:login
 
@@ -215,7 +215,7 @@ docs/                   12 份设计文档
 
 | 层 | 命令 | 抓什么 |
 | --- | --- | --- |
-| 单元/集成 | `mvn -o test`（服务端 267 + Spark 79，共 346） | 行为回归 |
+| 单元/集成 | `mvn -o test`（服务端 267 + Spark 81，共 348） | 行为回归 |
 | 端点多面 | `verify-console.py`、`verify-management-contract.py`、`verify-spark-sql-doc.py`、`verify-k8s-manifests.py` | **跨文件的机械一致性**：前端字段名 vs 服务端 record、文档表格 vs 规格、语法文件 vs 规格 vs 客户端 |
 | 契约（桩） | `ManagementSqlExecutionTests`（真实 SparkSession + 桩服务端） | 扩展真被加载、真执行 |
 | 契约（真服务端） | `./scripts/e2e-spark-sql.sh` | 客户端与服务端的**实际**契约（桩只能证明客户端与自己的假设自洽） |
@@ -257,7 +257,7 @@ docs/                   12 份设计文档
 2. **改了控制台源码没重建** → 打包的是上一版控制台，**不报错**，只是安静地少一个按钮。
    `verify-console.py` 第 7 组查产物新鲜度，但要有人跑它。判是否干净：
    `ls paimon-rest-server/target/classes/static/console/assets | wc -l` 应与源码目录一致。
-3. **`e2e-spark-sql.sh` 里三个测试类必须同批运行**：一个 JVM 只能有一个 SparkContext，
+3. **`e2e-spark-sql.sh` 里四个测试类必须同批运行**：一个 JVM 只能有一个 SparkContext，
    而 `spark.sql.extensions` 只在建会话时生效。把用桩的 `ManagementSqlExecutionTests`
    混进同一批会让 `LiveSparkSession` 报错（有意守卫，不是 bug）。
 4. **`sweep-console-auth.sh` / `check:login` 一分钟跑超 5 次会被服务端自己的失败限速拦下**

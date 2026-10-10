@@ -217,6 +217,7 @@ Spark 3.5.9 的 `spark-sql-api` 依赖 `antlr4-runtime` **4.9.3**，其自带的
 | 3 桩端到端 | `ManagementSqlExecutionTests`（12 个用例） | 真实 `SparkSession` + 进程内桩：扩展是否真被加载、`spark.sql` 是否真执行命令、结果行列名、原生 SQL 不受影响 |
 | 4 真实服务端 | `ManagementSqlLiveServerTests`（4 个用例） | 对真实 Paimon Rest Catalog Server 跑完整 SQL 链路，验证两侧实现的契约一致性 |
 | 4 真实服务端 | `PaimonTableDdlTests`（10 个用例） | 用 Spark SQL 经 Paimon Rest Catalog 建表再写入（分区 / 主键 / `LIKE` / 幂等 / 冲突 / CTAS / `INSERT`），并直接读服务端元数据核对 schema、注释、分区键、主键与表选项——建表与写入路径的契约一致性，详见 [`spark-paimon-rest-e2e.md`](spark-paimon-rest-e2e.md) |
+| 4 真实服务端 | `SparkSqlAuthorizationTests`（2 个用例） | 同一个 catalog、同一张表跑两个身份：有写权限的能建库建表读写，只读的读得到数据但建库 / 建表 / 写数据一律被拒，并断言拒绝报文点名了缺失的那项权限、被拒之后数据没变。服务端自己那两层授权测试走 MockMvc 直接打 REST，这一层验的是**引擎发出的请求**——403 会不会被 Paimon 客户端改写、拒绝后到底有没有落数据，跑法见 [`spark-paimon-rest-e2e.md`](spark-paimon-rest-e2e.md) §6.1 |
 | 4 真实服务端 | `SparkSqlDocExamplesTests`（1 个用例） | 抽出参考文档第 11 节的示例逐条执行，断言撤销语义与清理结果——**让文档里的 SQL 与代码同生共死** |
 
 第 1、2 层不建 `SparkSession`（解析只依赖客户端实例，不依赖会话），第 3 层起本地会话，

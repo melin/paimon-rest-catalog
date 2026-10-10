@@ -87,6 +87,31 @@ object LiveSparkSession {
      */
     val catalog: String = "paimon_catalog"
 
+    /**
+     * 以指定令牌**另开一个会话**，用来在同一个 catalog 上扮演另一个身份。
+     *
+     * <p><b>为什么不是再建一个 SparkSession。</b>一个 JVM 只能有一个 SparkContext，
+     * 而 `spark.sql.extensions` 只在建会话那一刻生效；`SparkSession.builder().getOrCreate()`
+     * 会直接把 {@link #instance} 返回给你，身份根本换不掉。
+     *
+     * <p>`newSession()` 满足这里的需求：它共享 SparkContext，但**另有一份 SQLConf**，
+     * 因此可以只改 `spark.sql.catalog.<catalog>.token` 而不影响别人。
+     * 令牌是这一层唯一的身份来源——服务端由
+     * `paimon.rest.auth.tokens` 认证出主体名，再由 RBAC 判定能做什么；
+     * Spark 与 Paimon 客户端都不认识「用户」这个概念。
+     *
+     * <p>改的是 catalog 配置，所以子会话必须在**第一次使用该 catalog 之前**取；
+     * 已经用过的会话不会因为改配置而换身份（`CatalogManager` 已经实例化过那个 catalog）。
+     */
+    def sessionAs(identity: String): SparkSession = {
+        require(identity.nonEmpty, "identity token must not be empty")
+        val session = instance.newSession()
+        session.conf.set("spark.sql.catalog." + catalog + ".token", identity)
+        require(session.conf.get("spark.sql.catalog." + catalog + ".token") == identity,
+            "子会话没能覆盖 catalog 令牌，身份不会生效")
+        session
+    }
+
     /** 会话按进程共享，只建一次。仅在有目标地址时才被触碰。 */
     lazy val instance: SparkSession = {
         // 同上：JDK 24+ 下 Spark 建会话必失败，提前换成一句能照做的提示
@@ -137,7 +162,7 @@ object LiveSparkSession {
             s"""拿到的 SparkSession 不是本 holder 创建的那个，扩展配置为 "$effective"。
                |一个 JVM 只能有一个 SparkContext，而 spark.sql.extensions 只在建会话时生效。
                |请只运行需要真实服务端的测试类，例如：
-               |  mvn -o -pl paimon-rest-spark test -Dtest=ManagementSqlLiveServerTests,PaimonTableDdlTests,SparkSqlDocExamplesTests
+               |  mvn -o -pl paimon-rest-spark test -Dtest=ManagementSqlLiveServerTests,PaimonTableDdlTests,SparkSqlAuthorizationTests,SparkSqlDocExamplesTests
                |或直接用 scripts/e2e-spark-sql.sh。""".stripMargin)
 
         // 提前初始化 sessionState：解析器在此时装配，装配出问题会立刻暴露，

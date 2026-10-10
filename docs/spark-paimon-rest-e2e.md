@@ -386,10 +386,17 @@ schema 物化补上之后它们已经翻转成断言写入成功。这个类保�
 ./scripts/e2e-spark-sql.sh
 ```
 
-它执行的三个测试类必须**同批运行**：一个 JVM 只能有一个 SparkContext，而
+它执行的四个测试类必须**同批运行**：一个 JVM 只能有一个 SparkContext，而
 `spark.sql.extensions` 只在建会话时生效，因此它们共用 `LiveSparkSession` 的会话。
 把用桩服务端的 `ManagementSqlExecutionTests` 拉进同一批会先建会话、把端点与扩展都错位，
 `LiveSparkSession` 会就此直接报错（而不是静默跑错）。
+
+| 类 | 验什么 |
+| --- | --- |
+| `ManagementSqlLiveServerTests` | 逐条管理语句对真实服务端验管理 API 契约 |
+| `PaimonTableDdlTests` | 建表、写入、读回，并核对落到服务端的 schema / 分区 / 表选项 / 路径 |
+| `SparkSqlAuthorizationTests` | 同一个 catalog、两种身份下的权限边界（见 6.1） |
+| `SparkSqlDocExamplesTests` | 执行 `spark-sql-reference.md` 第 11 节的示例 |
 
 只跑建表用例：
 
@@ -410,3 +417,40 @@ mvn -o -pl paimon-rest-spark test -Dtest=PaimonTableDdlTests \
 
 `-De2e.paimon.url` 可显式指定 catalog API 基址；不指定时由
 `-De2e.management.url` 去掉 `/api/management/v1` 得到——两者本来就挂在同一个服务端上。
+
+### 6.1 权限边界怎么验
+
+`SparkSqlAuthorizationTests` 用**同一个 catalog、同一张表**跑两种身份：令牌 `alice` 建库建表
+并读写，令牌 `bob` 只能读。这类用例要覆盖的不是「授权判定对不对」——那是服务端
+`AuthorizationTests` 与 `CatalogEndpointAuthorizationTests` 的活——而是**引擎发出的请求**：
+403 会不会被 Paimon 客户端改写成别的错、被拒绝的写入到底有没有落数据。
+
+因此服务端要多配两个令牌，并把它们映射到两个主体（`token-principals`）：
+
+```bash
+java -jar paimon-rest-server/target/paimon-rest-server-0.0.1-SNAPSHOT.jar \
+  --spring.profiles.active=h2 --server.port=18080 \
+  --paimon.rest.auto-create-catalog=true \
+  --paimon.rest.auth.enabled=true \
+  --paimon.rest.auth.tokens[0]=root \
+  --paimon.rest.auth.tokens[1]=alice --paimon.rest.auth.token-principals.alice=e2e_alice \
+  --paimon.rest.auth.tokens[2]=bob   --paimon.rest.auth.token-principals.bob=e2e_bob \
+  --paimon.rest.authorization.enabled=true \
+  --paimon.rest.authorization.service-admins[0]=root \
+  --paimon.rest.authorization.bootstrap-principal=root
+
+mvn -o -pl paimon-rest-spark test -Dtest=SparkSqlAuthorizationTests -DfailIfNoTests=false \
+  -De2e.management.url=http://127.0.0.1:18080/api/management/v1 \
+  -De2e.management.token=root
+```
+
+两件事容易踩：
+
+- **两个身份共用一份 SparkContext，只换令牌。** `LiveSparkSession.sessionAs(token)` 调
+  `newSession()` 拿到独立 SQLConf 再覆盖 `spark.sql.catalog.<catalog>.token`。一个 JVM 只能
+  有一个 SparkContext，`SparkSession.builder().getOrCreate()` 会直接复用已有会话，因此不能靠
+  重建会话换身份。
+- **只读身份也必须有 `NAMESPACE_READ_PROPERTIES`。** `SparkCatalog.initialize` 在 Spark 首次
+  解析到该 catalog 的限定名时懒加载它，而加载过程会去读默认命名空间 `default` 的属性
+  （`GET /v1/{prefix}/databases/default`）。缺了这一项，连第一句 `SELECT` 都到不了表——
+  它和「读不读数据」无关，属于「用得了这个 catalog」的门槛。用例的角色定义就是按这条给的。

@@ -101,7 +101,7 @@ Maven 坐标与包名：`groupId` 为 `io.github.melin`，三个 artifact 分别
 > 与本仓库代码无关。**这不是配置问题**——`-Djava.security.manager=allow` 在 JDK 24+
 > 会让 JVM 启动阶段直接失败，没有任何参数能绕过。
 > `-DskipTests` 打包不受影响；跑测试必须显式指定 JDK，例如
-> `JAVA_HOME=/path/to/jdk-21 ./mvnw test`。测试侧由 `SparkJdkRequirement` 在建会话前
+> `JAVA_HOME=/path/to/jdk-21 mvn test`。测试侧由 `SparkJdkRequirement` 在建会话前
 > 拦下这一情况并直接给出结论，不再让它以十几条 Hadoop 堆栈的形式出现。
 
 ### 2.1 准备数据库
@@ -126,14 +126,14 @@ mysql -h 127.0.0.1 -u root -p < sql/schema-mysql.sql
 
 ```bash
 # 全量构建
-JAVA_HOME=/path/to/jdk-21 ./mvnw -DskipTests install
+JAVA_HOME=/path/to/jdk-21 mvn -DskipTests install
 
-# 运行全部测试（服务端 267 + Spark 79，共 346 个用例）
-JAVA_HOME=/path/to/jdk-21 ./mvnw test
+# 运行全部测试（服务端 267 + Spark 81，共 348 个用例）
+JAVA_HOME=/path/to/jdk-21 mvn test
 
 # 启动服务端（默认 8080 端口，连 MySQL，预置 catalog prefix=paimon 与 database=default）
 # 这里必须是 17：运行服务端要避开 JDK 18+ 的 InetAddress 解析器 SPI，理由见本节开头
-JAVA_HOME=/path/to/jdk-17 ./mvnw -pl paimon-rest-server spring-boot:run
+JAVA_HOME=/path/to/jdk-17 mvn -pl paimon-rest-server spring-boot:run
 
 # 打包后直接运行（同样用 17 起的 JDK）
 java -jar paimon-rest-server/target/paimon-rest-server-0.0.1-SNAPSHOT.jar
@@ -211,8 +211,8 @@ Management API（catalog、主体、服务角色、catalog 角色与 grants）�
 | `postgresql` | PostgreSQL | `ddl-auto: update` | 备用；**未做端到端验证** |
 
 ```bash
-./mvnw -pl paimon-rest-server spring-boot:run -Dspring-boot.run.profiles=h2
-./mvnw -pl paimon-rest-server spring-boot:run -Dspring-boot.run.profiles=postgresql
+mvn -pl paimon-rest-server spring-boot:run -Dspring-boot.run.profiles=h2
+mvn -pl paimon-rest-server spring-boot:run -Dspring-boot.run.profiles=postgresql
 ```
 
 ---
@@ -560,10 +560,10 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
 
 ## 7. 测试
 
-### 单元与集成测试（346 个用例）
+### 单元与集成测试（348 个用例）
 
 ```bash
-JAVA_HOME=/path/to/jdk-21 ./mvnw test
+JAVA_HOME=/path/to/jdk-21 mvn test
 ```
 
 测试连的是内存 H2（`test` profile，见 `src/test/resources/application-test.yml`），
@@ -599,7 +599,7 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 | `MysqlDdlGeneratorTests` | 由实体元数据生成 MySQL DDL，并断言方言被钉在 MySQL 8.0（见「代码生成」） |
 | `PaimonRestServerApplicationTests` | 上下文加载 |
 
-Spark 子模块（79 个，其中 17 个需要显式指向服务端）：
+Spark 子模块（81 个，其中 19 个需要显式指向服务端）：
 
 | 测试类 | 覆盖 |
 | --- | --- |
@@ -608,6 +608,7 @@ Spark 子模块（79 个，其中 17 个需要显式指向服务端）：
 | `ManagementSqlExecutionTests` | 真实 `SparkSession` + 桩服务端：扩展是否真被加载、`spark.sql` 是否真执行命令、结果行列名、原生 SQL 不受影响 |
 | `ManagementSqlLiveServerTests` | 对真实服务端跑完整 SQL 链路（默认跳过，见下） |
 | `PaimonTableDdlTests` | 用 Spark SQL 经 Paimon Rest Catalog 建表再写入：分区 append 表与主键表（含分区主键）、`LIKE`、`IF NOT EXISTS` 幂等与裸建冲突、内联主键约束与保留表属性被 Spark 拒绝、库不存在时报错，以及 `CTAS` 与分区主键表 `INSERT` 写完后读回数据；两种断言并重——`DESCRIBE` / `SHOW CREATE TABLE` 的输出，以及直接读服务端元数据核对注释、分区键、主键与选项（默认跳过，见下） |
+| `SparkSqlAuthorizationTests` | 同一个 catalog、同一张表，两个身份各跑一遍真 SQL：有写权限的那个能建库、建表、写入、读回；只读的那个读得到数据、也看得见表列表，但建库 / 建表 / 写数据一律被服务端授权判定拒绝，且断言拒绝报文点名了主体与**缺失的那一项权限**（`TABLE_CREATE` / `TABLE_WRITE_DATA` / `NAMESPACE_CREATE`）、被拒之后数据没变（默认跳过，见下）。服务端已有的两层授权测试都走 MockMvc 直接打 REST，这一层验的是**引擎发出的请求**——403 会不会被 Paimon 客户端改写、拒绝后到底有没有落数据，只有真 SQL 才知道 |
 | `SparkSqlDocExamplesTests` | 抽出 `docs/spark-sql-reference.md` 第 11 节的示例并逐条执行，断言撤销语义与清理结果（默认跳过，见下） |
 | `PaimonRestCatalogTest` | 对象存储仓库的凭据链路：建表后服务端返回的 `path` 由 warehouse 模板展开、`INSERT` 写入分区主键表并逐列读回（默认跳过，见下）。它同时压住「类路径缺 `s3://` FileIO 实现」与「凭据没按引擎认的键名下发」这两种失败 |
 | `PaimonRestManagementTests` | 配置解析的容错 |
@@ -626,8 +627,9 @@ BASE=http://127.0.0.1:8080 ./scripts/api-sweep.sh
 # Management API：覆盖规格中全部 33 个 operation
 BASE=http://127.0.0.1:8080 ./scripts/management-sweep.sh
 
-# Spark SQL：先校验参考文档，再自动起服务端（用 h2 profile）、跑
-# ManagementSqlLiveServerTests + PaimonTableDdlTests + SparkSqlDocExamplesTests、
+# Spark SQL：先校验参考文档，再自动起服务端（用 h2 profile，并配好令牌
+# root / limited / alice / bob）、跑 ManagementSqlLiveServerTests +
+# PaimonTableDdlTests + SparkSqlAuthorizationTests + SparkSqlDocExamplesTests、
 # 收尾停服务端
 ./scripts/e2e-spark-sql.sh
 
@@ -785,7 +787,7 @@ python3 scripts/verify-k8s-manifests.py
 用 Spark SQL 经 Paimon Rest Catalog 建表，再把服务端侧的元数据打印出来。
 
 ```bash
-./mvnw -o install -DskipTests      # 只需一次
+mvn -o install -DskipTests    # 只需一次
 cd examples/spark-paimon-rest && ./run-example.sh
 ```
 
@@ -817,7 +819,7 @@ http://localhost:8080/console/
 - **它是运维工具，不是写入入口。** 不提供 `commitTable`（控制台拼不出一个指向真实文件的快照）；
   对表的改动只有结构变更、回滚与授权。
 - **构建产物提交在仓库里。** 产物落在 `paimon-rest-server/src/main/resources/static/console`，
-  因此 `./mvnw package` 与 Dockerfile 都不需要 Node；代价是改了前端必须重建并提交产物，
+  因此 `mvn package` 与 Dockerfile 都不需要 Node；代价是改了前端必须重建并提交产物，
   用 `./scripts/build-console.sh` 一条命令完成构建与校验。
 - **路径不靠人工比对。** 全部端点收在 `paimon-rest-console/src/api/endpoints.js` 一张表里，
   由 `scripts/verify-console.py` 与两份 OpenAPI 规格机械比对（11 组 28 项：端点存在性、
