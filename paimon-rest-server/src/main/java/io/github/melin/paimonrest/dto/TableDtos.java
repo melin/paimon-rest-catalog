@@ -107,7 +107,24 @@ public final class TableDtos {
     public record ListSnapshotsResponse(List<Snapshot> snapshots, String nextPageToken) {
     }
 
-    public record GetTableDataTokenResponse(Map<String, String> token, Long expiresAt) {
+    /**
+     * `GET .../tables/{table}/token` 的响应：一份范围限定到单表的存储凭据与它的失效时刻。
+     *
+     * <p><b>为什么同一个时刻回两个名字。</b>规格把有效期字段定义为 `expiresAt`
+     * （`spec/rest-catalog-open-api.yaml` 的 `GetTableDataTokenResponse`），
+     * 而 Paimon 客户端读的是 `expiresAtMillis`
+     * （`paimon-api` 的 `org.apache.paimon.rest.responses.GetTableTokenResponse`
+     * 上写着 `@JsonProperty("expiresAtMillis")`）——两侧不自洽，只有后一个名字能被客户端认出来。
+     *
+     * <p>只回 `expiresAt` 的后果不是报错而是**静默劣化**：客户端把有效期读成 0
+     * （反序列化时字段缺失即默认值），而 `RESTTokenFileIO` 判定「有效期不足一小时就刷新」，
+     * 于是每一次文件操作前都会重新请求一次本接口——把凭据缓存彻底架空。
+     *
+     * <p>两个名字都回是为了同时伺候「照规格写的客户端」与「Paimon 自己的客户端」。
+     * 多一个字段对前者无害：Paimon 客户端的 ObjectMapper 不拒绝未知字段。
+     */
+    public record GetTableDataTokenResponse(Map<String, String> token, Long expiresAt,
+                                            Long expiresAtMillis) {
     }
 
     public record AuthTableQueryRequest(List<String> select) {

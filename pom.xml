@@ -112,6 +112,28 @@
 				<version>${paimon.version}</version>
 			</dependency>
 			<!--
+				S3 的 FileIO 实现。
+
+				引擎侧要与「warehouse 在对象存储上」的 catalog 打交道，类路径里就必须有
+				对应 scheme 的 FileIO：`paimon-spark` bundle 只带了本地文件系统与 Hadoop
+				回退，遇到 `s3://` 会以
+				`UnsupportedSchemeException: Could not find a file io implementation for
+				scheme 's3'` 收场。测试与生产同理，只是生产上这份 jar 由发行版提供
+				（放进 `spark/jars`），测试期得自己声明。
+
+				为什么整份引入而不是只挑 impl：`paimon-s3` 是 Paimon 约定的部署单元——
+				顶层只有 `org.apache.paimon.s3.S3Loader` 与 SPI 声明，真正的实现连同
+				shade 过的 hadoop-aws 一起放在 jar 内的 `paimon-plugin-s3/` 下，
+				由 `PluginFileIO` 用自己的类加载器加载，因此**不会**与类路径上的
+				Hadoop / Jackson 相互覆盖。代价是这份 jar 很大（约 96 MB），
+				但它是 test scope，不进产物。
+			-->
+			<dependency>
+				<groupId>org.apache.paimon</groupId>
+				<artifactId>paimon-s3</artifactId>
+				<version>${paimon.version}</version>
+			</dependency>
+			<!--
 				Paimon 的 Spark 扩展在初始化时引用 spark-hive 里的 HiveUDFExpressionBuilder
 				（Spark 发行版自带 spark-hive，因此提交到集群时天然可用）。
 				直接跑 JUnit 时没有这份 jar，会话会初始化失败，故测试期显式引入。

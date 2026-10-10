@@ -27,6 +27,19 @@
 本项目把这两项声明为 `paimon-rest-spark` 的**测试**依赖（`paimon-rest-spark/pom.xml`），
 发布产物里不含它们——本模块自己只做管理语句扩展，不依赖 Paimon 运行时。
 
+**warehouse 落在对象存储上时还要补一样**：对应 scheme 的 FileIO 实现。
+`paimon-spark` bundle 只带本地文件系统与 Hadoop 回退，catalog 的仓库是 `s3://…` 时，
+客户端会以
+
+```
+org.apache.paimon.fs.UnsupportedSchemeException: Could not find a file io implementation
+for scheme 's3' in the classpath. Hadoop FileSystem also cannot access this path 's3://…'
+```
+
+失败。这条报错来自**引擎的类路径，与服务端无关**：服务端做不做 S3 都改变不了它。
+S3 加 `org.apache.paimon:paimon-s3:2.0.0`（OBS / OSS 分别是 `paimon-obs` / `paimon-oss`），
+生产上放进 `spark/jars`，本仓库的测试已经在 `paimon-rest-spark/pom.xml` 里声明。
+
 ### 1.2 会话配置
 
 ```properties
@@ -41,6 +54,8 @@ spark.sql.catalog.paimon.uri=http://catalog-host:8080
 spark.sql.catalog.paimon.warehouse=paimon
 spark.sql.catalog.paimon.token.provider=bear
 spark.sql.catalog.paimon.token=<调用者主体的令牌>
+# 仓库在对象存储（s3:// / obs:// / oss://）上时**必须**打开，见 1.4
+spark.sql.catalog.paimon.data-token.enabled=true
 ```
 
 两个扩展的顺序有讲究：本项目的扩展先用自己的解析器识别管理语句，识别不了就原样交回
@@ -62,6 +77,38 @@ spark-sql \
   --conf spark.sql.catalog.paimon.token.provider=bear \
   --conf spark.sql.catalog.paimon.token=root
 ```
+
+### 1.4 对象存储的凭据从哪来
+
+仓库在 `s3://`（或 `obs://` / `oss://`）上时，客户端自己**没有任何密钥**——
+端点和密钥都由服务端下发，这正是 REST 目录存在的意义。链路是：
+
+1. 类路径里要有对应 scheme 的 FileIO 实现，见 1.1；
+2. 会话里要打开 `data-token.enabled`，见 1.2；
+3. 客户端在新建 FileIO 之前请求
+   `GET /v1/{prefix}/databases/{db}/tables/{t}/token`，服务端按 catalog 的
+   `storageConfigInfo` 返回一份短时效令牌（键值对 + 有效期）。
+
+服务端返回的令牌里，S3 的**密钥有两个名字**，都要给：
+
+```
+s3.access-key-id / s3.secret-access-key   # 规格（Polaris / Iceberg）的叫法
+s3.access-key    / s3.secret-key          # Paimon 引擎的叫法
+```
+
+Paimon 拿到令牌后会把所有 `s3.*` 键按前缀整体翻译成 Hadoop 的 `fs.s3a.*`
+（`s3.access-key` → `fs.s3a.access-key`），再做一次小范围镜像
+（`fs.s3a.access-key` → `fs.s3a.access.key`）。于是 `s3.access-key-id` 只会变成
+`fs.s3a.access-key-id`——Hadoop 不认识这个键，镜像表里也没有它，**密钥被静默丢弃**，
+引擎退回默认凭据链（环境变量 / 实例身份），在测试机上必然认证失败。
+定位类键名同理：`s3.endpoint` → `fs.s3a.endpoint`、`s3.region` → `fs.s3a.region`
+都能对上，`s3.path-style-access` 会被镜像成 Hadoop 的
+`fs.s3a.path.style.access`。
+
+> **`endpoint` 写裸 IP 时注意路径风格。** 关掉 path-style 后，客户端会按虚拟主机风格
+> 把桶名拼进主机名（`<bucket>.<endpoint>`）去解析；`endpoint` 是
+> `http://172.18.6.181:9330` 这种裸 IP 时，拼出来的主机名解析不了。
+> 这类对象存储上的 catalog 一般要把 `storageConfigInfo.pathStyleAccess` 设为 `true`。
 
 ---
 
@@ -205,6 +252,13 @@ RuntimeException: Exception occurs when preparing snapshot #1 by user <uuid> wit
 **守卫用例**：它断言的是「当前不可用」而不是「期望不可用」——等数据面补齐，它会失败，
 从而提醒改动者回来更新本节。它同时断言失败是**原子**的：写入阶段出错不会在 catalog 里留下
 一张空表，这一点决定了失败之后要不要手工清理，光看报错看不出来。
+
+仓库落在对象存储上时，这条边界还顺带成了**凭据链路**的观测点：写入必然要碰
+`s3://` 上的 `<table>/snapshot` 与 `<table>/schema`，因此它也是客户端第一次真正访问
+对象存储的地方。`PaimonRestCatalogTest.writeStopsAtTheDocumentedDataPlaneGap` 据此把
+「失败停在哪一步」钉住——停在上面这条链上，说明类路径与凭据都到位；停在
+`UnsupportedSchemeException`，说明缺 FileIO 实现（见 1.1）；停在一句 `UnknownReason`，
+说明凭据没送到客户端（见 1.4）。
 
 ---
 

@@ -39,7 +39,8 @@ import scala.collection.JavaConverters._
  *
  * <p><b>会话如何配置。</b>Spark 的 `spark.sql.extensions` 只在建会话那一刻生效，
  * 且一个 JVM 只能有一个 SparkContext，所以这里共用 {@link LiveSparkSession}
- * 里那个已配好 Paimon 扩展与 `spark.sql.catalog.paimon` 的会话。
+ * 里那个已配好 Paimon 扩展与 `spark.sql.catalog.<catalog>` 的会话；
+ * catalog 名一律走 {@link #catalog}，不写死。
  *
  * <p><b>断言分两层。</b>
  * <ol>
@@ -67,6 +68,18 @@ class PaimonTableDdlTests {
 
   import PaimonTableDdlTests._
 
+  /**
+   * 目标 catalog 名，由 [[LiveSparkSession]] 统一给出，**不要在 SQL 里写死**。
+   *
+   * <p>它既是 `spark.sql.catalog.<name>` 的后缀，也是服务端上的 catalog prefix，
+   * 取决于目标服务端的配置。写死某个名字（例如 `paimon`）而目标服务端的 catalog
+   * 叫别的名字时，Spark 会把它当成「未注册的 catalog」，报出来的却是一句
+   * `Undefined error message parameter for error class '_LEGACY_ERROR_TEMP_1055'`——
+   * 与真正的原因（catalog 名字对不上）毫无关系，非常难查。
+   * 注意 `USING paimon` 里的 `paimon` 是**数据源名**，与 catalog 名无关，保持原样。
+   */
+  private def catalog: String = LiveSparkSession.catalog
+
   /** 每个测试独占一个库，避免用例之间互相看见对方的表。 */
   private var database: String = ""
 
@@ -75,7 +88,7 @@ class PaimonTableDdlTests {
     Assumptions.assumeTrue(LiveSparkSession.isAvailable,
       "跳过：需要 -De2e.management.url=<管理 API 基址>，见 scripts/e2e-spark-sql.sh")
     database = "ddl_" + UUID.randomUUID().toString.replace("-", "").substring(0, 12)
-    sql(s"CREATE DATABASE paimon.$database")
+    sql(s"CREATE DATABASE $catalog.$database")
   }
 
   @AfterEach
@@ -86,13 +99,13 @@ class PaimonTableDdlTests {
     }
     // Paimon 不允许删非空库，先清空表
     try {
-      sql(s"SHOW TABLES IN paimon.$database").map(_.getString(1)).foreach { table =>
-        sqlQuietly(s"DROP TABLE IF EXISTS paimon.$database.$table")
+      sql(s"SHOW TABLES IN $catalog.$database").map(_.getString(1)).foreach { table =>
+        sqlQuietly(s"DROP TABLE IF EXISTS $catalog.$database.$table")
       }
     } catch {
       case _: Throwable => ()
     }
-    sqlQuietly(s"DROP DATABASE IF EXISTS paimon.$database")
+    sqlQuietly(s"DROP DATABASE IF EXISTS $catalog.$database")
   }
 
   // ------------------------------------------------------------------ 正常路径
@@ -106,7 +119,7 @@ class PaimonTableDdlTests {
   @Test
   def partitionedAppendTableRoundTripsThroughServer(): Unit = {
     val table = "orders"
-    sql(s"CREATE TABLE paimon.$database.$table (" +
+    sql(s"CREATE TABLE $catalog.$database.$table (" +
       "id BIGINT COMMENT '订单号', " +
       "amount DECIMAL(18,2) COMMENT '成交金额', " +
       "dt STRING COMMENT '分区日') " +
@@ -121,14 +134,14 @@ class PaimonTableDdlTests {
     assertEquals(("decimal(18,2)", "成交金额"), columns("amount"))
     assertEquals(("string", "分区日"), columns("dt"))
 
-    val ddl = singleValue(s"SHOW CREATE TABLE paimon.$database.$table")
+    val ddl = singleValue(s"SHOW CREATE TABLE $catalog.$database.$table")
     assertTrue(ddl.contains("USING paimon"), ddl)
     assertTrue(ddl.contains("PARTITIONED BY (dt)"), ddl)
     assertTrue(ddl.contains("COMMENT '订单明细表'"), ddl)
     assertTrue(ddl.contains("'bucket-key' = 'id'"), ddl)
     assertTrue(ddl.contains("'purpose' = 'e2e'"), ddl)
 
-    assertTrue(sql(s"SHOW TABLES IN paimon.$database").exists(_.getString(1) == table),
+    assertTrue(sql(s"SHOW TABLES IN $catalog.$database").exists(_.getString(1) == table),
       "SHOW TABLES 应包含刚建的表")
 
     // ---- 服务端侧：schema 与选项确实落库
@@ -159,7 +172,7 @@ class PaimonTableDdlTests {
   @Test
   def primaryKeyTableIsDeclaredThroughTableProperty(): Unit = {
     val table = "pk_orders"
-    sql(s"CREATE TABLE paimon.$database.$table (" +
+    sql(s"CREATE TABLE $catalog.$database.$table (" +
       "id BIGINT COMMENT '订单号', amount DECIMAL(18,2)) " +
       "USING paimon TBLPROPERTIES ('primary-key' = 'id', 'bucket' = '1')")
 
@@ -179,7 +192,7 @@ class PaimonTableDdlTests {
   @Test
   def partitionedPrimaryKeyTableKeepsPartitionColumnsInTheKey(): Unit = {
     val table = "pk_partitioned"
-    sql(s"CREATE TABLE paimon.$database.$table (" +
+    sql(s"CREATE TABLE $catalog.$database.$table (" +
       "id BIGINT, amount DECIMAL(18,2), dt STRING) " +
       "USING paimon PARTITIONED BY (dt) " +
       "TBLPROPERTIES ('primary-key' = 'id,dt', 'bucket' = '1')")
@@ -194,12 +207,12 @@ class PaimonTableDdlTests {
   def createTableLikeCopiesSchemaAndComments(): Unit = {
     val source = "orders"
     val copy = "orders_copy"
-    sql(s"CREATE TABLE paimon.$database.$source (" +
+    sql(s"CREATE TABLE $catalog.$database.$source (" +
       "id BIGINT COMMENT '订单号', dt STRING COMMENT '分区日') " +
       "USING paimon PARTITIONED BY (dt) " +
       "TBLPROPERTIES ('bucket' = '1', 'bucket-key' = 'id')")
 
-    sql(s"CREATE TABLE paimon.$database.$copy LIKE paimon.$database.$source USING paimon")
+    sql(s"CREATE TABLE $catalog.$database.$copy LIKE $catalog.$database.$source USING paimon")
 
     assertEquals(describedColumns(database, source), describedColumns(database, copy),
       "LIKE 应复制列定义与注释")
@@ -219,14 +232,14 @@ class PaimonTableDdlTests {
   @Test
   def ifNotExistsIsIdempotentAndBareCreateConflicts(): Unit = {
     val table = "dup"
-    sql(s"CREATE TABLE IF NOT EXISTS paimon.$database.$table (id BIGINT) USING paimon")
-    sql(s"CREATE TABLE IF NOT EXISTS paimon.$database.$table (id BIGINT, extra STRING) USING paimon")
+    sql(s"CREATE TABLE IF NOT EXISTS $catalog.$database.$table (id BIGINT) USING paimon")
+    sql(s"CREATE TABLE IF NOT EXISTS $catalog.$database.$table (id BIGINT, extra STRING) USING paimon")
 
     assertEquals(List("id"), fieldNames(serverTable(database, table).get("schema")),
       "IF NOT EXISTS 不应修改已存在的表结构")
 
     val conflict = assertThrows(classOf[TableAlreadyExistsException], () =>
-      sql(s"CREATE TABLE paimon.$database.$table (id BIGINT) USING paimon"))
+      sql(s"CREATE TABLE $catalog.$database.$table (id BIGINT) USING paimon"))
     assertTrue(conflict.getMessage.contains("already exists"), conflict.getMessage)
   }
 
@@ -241,7 +254,7 @@ class PaimonTableDdlTests {
   @Test
   def inlinePrimaryKeyConstraintIsRejectedBySparkParser(): Unit = {
     val error = assertThrows(classOf[ParseException], () =>
-      sql(s"CREATE TABLE paimon.$database.inline_pk (" +
+      sql(s"CREATE TABLE $catalog.$database.inline_pk (" +
         "id BIGINT, amount DECIMAL(18,2), PRIMARY KEY (id) NOT ENFORCED) USING paimon"))
     assertTrue(error.getMessage.contains("Syntax error"), error.getMessage)
   }
@@ -256,7 +269,7 @@ class PaimonTableDdlTests {
   @Test
   def reservedTablePropertyIsRejectedBeforeItReachesTheServer(): Unit = {
     val error = assertThrows(classOf[ParseException], () =>
-      sql(s"CREATE TABLE paimon.$database.reserved (id BIGINT) USING paimon " +
+      sql(s"CREATE TABLE $catalog.$database.reserved (id BIGINT) USING paimon " +
         "TBLPROPERTIES ('owner' = 'someone-else')"))
     assertTrue(error.getMessage.contains("reserved table property"), error.getMessage)
   }
@@ -266,7 +279,7 @@ class PaimonTableDdlTests {
   def creatingTableInMissingDatabaseFails(): Unit = {
     val missing = database + "_absent"
     val error = assertThrows(classOf[NoSuchNamespaceException], () =>
-      sql(s"CREATE TABLE paimon.$missing.t (id BIGINT) USING paimon"))
+      sql(s"CREATE TABLE $catalog.$missing.t (id BIGINT) USING paimon"))
     assertTrue(error.getMessage.contains(missing), error.getMessage)
   }
 
@@ -286,11 +299,11 @@ class PaimonTableDdlTests {
   def createTableAsSelectNeedsADataPlaneTheCatalogDoesNotHave(): Unit = {
     val table = "ctas"
     val error = assertThrows(classOf[RuntimeException], () =>
-      sql(s"CREATE TABLE paimon.$database.$table USING paimon AS SELECT 1L AS id, 'x' AS name"))
+      sql(s"CREATE TABLE $catalog.$database.$table USING paimon AS SELECT 1L AS id, 'x' AS name"))
 
     assertTrue(causeChainContains(error, "Cannot get latest schema for table"),
       "报错链应与 docs/spark-paimon-rest-e2e.md 第 4 节一致，实际: " + error.getMessage)
-    assertFalse(sql(s"SHOW TABLES IN paimon.$database").exists(_.getString(1) == table),
+    assertFalse(sql(s"SHOW TABLES IN $catalog.$database").exists(_.getString(1) == table),
       "写入失败后不应把空表留在 catalog 里")
   }
 
@@ -316,7 +329,7 @@ class PaimonTableDdlTests {
 
   /** `DESCRIBE` 的列名 → (类型, 注释)，丢掉 `# Partition Information` 这类分隔行。 */
   private def describedColumns(db: String, table: String): Map[String, (String, String)] =
-    sql(s"DESCRIBE paimon.$db.$table")
+    sql(s"DESCRIBE $catalog.$db.$table")
       .filterNot(_.getString(0).startsWith("#"))
       .map(row => row.getString(0) -> (row.getString(1), row.getString(2)))
       .toMap

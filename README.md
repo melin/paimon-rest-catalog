@@ -397,7 +397,7 @@ JDK 的 `HttpClient` 也没有对应的调节项，因此它们不改变行为�
 
 | storageType | 下发的键 | 密钥来源 |
 | --- | --- | --- |
-| `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | catalog 静态凭据 → 具名存储 → 默认配置 → 环境凭据链 |
+| `S3` | `s3.access-key-id`、`s3.secret-access-key`、`s3.access-key`、`s3.secret-key`、`s3.region`、`s3.endpoint`、`s3.path-style-access` | catalog 静态凭据 → 具名存储 → 默认配置 → 环境凭据链 |
 | `AZURE` | `azure.tenant-id`、`azure.account`、`azure.hierarchical`、`azure.multi-tenant-app-name`、`azure.consent-url` | 仅定位元数据，见下 |
 | `GCS` | `gcs.oauth2.token`、`gcs.oauth2.token-expires-at`、`gcs.service-account` | 服务端配置 → 环境凭据链 |
 | `OBS` | `fs.obs.access.key`、`fs.obs.secret.key`、`fs.obs.session.token`、`fs.obs.endpoint` | 具名存储 → 默认配置 → 环境凭据链 |
@@ -414,6 +414,16 @@ Paimon 的 `paimon-obs` 与 `paimon-oss` 是两个独立的 FileIO。两家的�
 `endpointInternal`、`stsEndpoint`、`roleArn`、`externalId`、`userArn` 一律不下发：
 前者规格明确写了客户端看不到，后三者是服务端去换临时凭据的材料。
 下发的键名写错不会报错，只会让引擎静默拿不到凭据，因此每种类型都有断言键名本身的测试。
+
+**S3 是唯一要下发两套密钥键名的一族**，因为两个消费方叫法不同：
+规格（Polaris / Iceberg）叫 `s3.access-key-id` / `s3.secret-access-key`，
+Paimon 叫 `s3.access-key` / `s3.secret-key`，两边互不认识。
+只给规格键名时，Paimon 的 `paimon-s3` 会把 `s3.access-key-id` 翻译成
+`fs.s3a.access-key-id`——Hadoop 里没有这个键，它的镜像表只认
+`fs.s3a.access.key` / `fs.s3a.secret.key`，于是密钥被**静默丢弃**，
+引擎退回默认凭据链并报 `NoAuthWithAWSException: No AWS Credentials provided by ...`。
+这个异常类来自插件的隔离类加载器，Spark 上报时序列化不到 driver，
+最终在用户面前只剩一句 `UnknownReason`。同时下发两套，两边才都能用。
 
 仍可用 S3 类型接入华为云与阿里云：两者都提供 S3 兼容端点，把 `endpoint` 指向该端点即可。
 代价是拿不到厂商原生的临时凭据键与凭据提供器配置，且多依赖一层协议转换。

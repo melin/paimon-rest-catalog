@@ -83,6 +83,33 @@ class StorageCredentialResolutionTests {
         assertTrue(vended.namedStorage());
     }
 
+    /**
+     * S3 的密钥必须同时以规格键名与引擎键名下发。
+     *
+     * <p>Polaris / Iceberg 认 {@code s3.access-key-id}，Paimon 认
+     * {@code s3.access-key}——Paimon 的 {@code paimon-s3} 会把 {@code s3.}
+     * 前缀整体换成 Hadoop 的 {@code fs.s3a.}，再镜像成
+     * {@code fs.s3a.access.key} / {@code fs.s3a.secret.key}，
+     * 而 {@code fs.s3a.access-key-id} 不在镜像表里。
+     *
+     * <p>只给规格键名的后果不是报错，是引擎静默拿不到密钥、退回默认凭据链，
+     * 报出来的 {@code NoAuthWithAWSException} 还被插件类加载器挡在 driver 之外，
+     * 最后只剩一句 {@code UnknownReason}。所以这条断言针对的是「两边都能用」，
+     * 而不是「回了一个值」。
+     */
+    @Test
+    void s3VendsCredentialsUnderBothSpecAndEngineKeyNames() {
+        setDefaultAwsKeys("AKIA-DEFAULT", "SECRET-DEFAULT");
+
+        VendedStorageCredential vended = manager.vend(s3("s3://bucket-a/prefix", null), "t1", null);
+
+        Map<String, String> token = vended.token();
+        assertEquals("AKIA-DEFAULT", token.get("s3.access-key-id"));
+        assertEquals("SECRET-DEFAULT", token.get("s3.secret-access-key"));
+        assertEquals("AKIA-DEFAULT", token.get("s3.access-key"));
+        assertEquals("SECRET-DEFAULT", token.get("s3.secret-key"));
+    }
+
     @Test
     void s3FallsBackToDefaultCredentialsWhenNoStorageName() {
         setDefaultAwsKeys("AKIA-DEFAULT", "SECRET-DEFAULT");
@@ -99,6 +126,8 @@ class StorageCredentialResolutionTests {
 
         assertFalse(vended.token().containsKey("s3.access-key-id"));
         assertFalse(vended.token().containsKey("s3.secret-access-key"));
+        assertFalse(vended.token().containsKey("s3.access-key"));
+        assertFalse(vended.token().containsKey("s3.secret-key"));
         assertEquals(VendedStorageCredential.SOURCE_ENVIRONMENT, vended.source());
     }
 

@@ -97,6 +97,23 @@
 			<scope>test</scope>
 		</dependency>
 		<!--
+			S3 的 FileIO 实现（Paimon 的 `paimon-s3` 插件）。
+
+			上面那个 bundle 只有本地文件系统与 Hadoop 回退，catalog 的 warehouse 落在
+			`s3://` 上时，客户端会以
+			`UnsupportedSchemeException: Could not find a file io implementation for
+			scheme 's3' in the classpath` 失败——这是**引擎侧**的依赖，与我们的服务端无关：
+			生产上这份 jar 要放进 `spark/jars`，测试期则靠这里声明。
+
+			同样是 test scope：发布产物里没有它，本模块运行时也不需要它。
+			体积很大（约 96 MB，内含 shade 过的 hadoop-aws），原因见父 POM 的说明。
+		-->
+		<dependency>
+			<groupId>org.apache.paimon</groupId>
+			<artifactId>paimon-s3</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<!--
 			Paimon 的 Spark 扩展初始化时会引用 spark-hive 中的 HiveUDFExpressionBuilder。
 			提交到集群时 spark-hive 由发行版提供，直接跑 JUnit 时没有，因此测试期引入。
 		-->
@@ -108,7 +125,27 @@
 		<!--
 			本地跑 SparkSession 时的日志实现。Spark 自带 log4j2，
 			本模块只用来在测试里压低 Spark 的启动日志噪声。
+
+			紧随其后的 slf4j-simple 是 2.x，走的是 slf4j 2 的 SPI
+			（`org.slf4j.spi.SLF4JServiceProvider`）。但传递依赖里还有一份
+			slf4j-api 1.7.32（由 paimon-spark 带来）——1.7 只认
+			`org.slf4j.impl.StaticLoggerBinder`，与 2.x 的实现互不匹配，
+			结果是**一个绑定都装不上**，全局退化成 NOP：
+			测试期 Spark 的一切日志（包括任务失败的真实异常）都被丢弃。
+
+			这里显式钉住 2.0.18，且用 provided 而不是 test：
+			provided 同时进主编译类路径与测试运行时——用 test 会让
+			slf4j-api 从主编译类路径上消失（`ManagementCommands` 引用了
+			`org.slf4j.Logger`，会直接编译失败），用默认作用域又会把它打进产物。
+			直接声明的依赖在版本仲裁里优先于传递依赖，所以这一条就能把 1.7.32 顶掉。
+			不要删——删掉不会报错，只会让测试再次「什么都看不到」。
 		-->
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-api</artifactId>
+			<version>2.0.18</version>
+			<scope>provided</scope>
+		</dependency>
 		<dependency>
 			<groupId>org.slf4j</groupId>
 			<artifactId>slf4j-simple</artifactId>

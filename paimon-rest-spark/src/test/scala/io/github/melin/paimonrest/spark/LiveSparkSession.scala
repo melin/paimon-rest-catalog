@@ -110,6 +110,18 @@ object LiveSparkSession {
             .config("spark.sql.catalog." + catalog + ".warehouse", catalog)
             .config("spark.sql.catalog." + catalog + ".token.provider", "bear")
             .config("spark.sql.catalog." + catalog + ".token", token)
+            // 让客户端向服务端索取表级数据访问凭据（Paimon 的 data token）。
+            //
+            // 为什么必须开：catalog 的 warehouse 落在 `s3://`（或 OBS / OSS）上时，
+            // 客户端自己没有任何密钥，**端点和密钥都由服务端下发**——这正是
+            // REST 目录存在的意义（引擎不持有对象存储的长期密钥）。默认值是 false，
+            // 此时客户端会拿本机凭据链去连 S3，在测试机上必然是
+            // `Could not find a file io implementation` 或签名失败。
+            //
+            // 对 FILE 仓库无害：服务端仍会回一份自包含令牌，本地文件系统不读它。
+            // 代价是每次新建 FileIO 之前多一次 `.../tables/{t}/token` 请求，
+            // 凭据在有效期内由双方缓存。
+            .config("spark.sql.catalog." + catalog + ".data-token.enabled", "true")
             .config(PaimonRestManagement.MANAGEMENT_URL, managementUrl)
             .config(PaimonRestManagement.TOKEN, token)
             .getOrCreate()

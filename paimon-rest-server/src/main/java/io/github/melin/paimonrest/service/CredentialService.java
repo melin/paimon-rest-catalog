@@ -57,7 +57,10 @@ public class CredentialService {
         StorageCredentialCache.Cached cached = cache.get(key).orElseGet(() -> cache.put(key,
                 storagePolicy.credentialManager().vend(storage, target.getId(), target.getPath()), now));
 
-        return new TableDtos.GetTableDataTokenResponse(cached.credential().token(), cached.expiresAtMillis());
+        // 同一个时刻回两个名字：规格写的是 expiresAt，Paimon 客户端读的是 expiresAtMillis。
+        // 理由与后果见 GetTableDataTokenResponse 的注释。
+        long expiresAt = cached.expiresAtMillis();
+        return new TableDtos.GetTableDataTokenResponse(cached.credential().token(), expiresAt, expiresAt);
     }
 
     /**

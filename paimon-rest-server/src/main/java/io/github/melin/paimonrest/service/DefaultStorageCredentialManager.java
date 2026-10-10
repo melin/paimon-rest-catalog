@@ -35,6 +35,11 @@ import org.springframework.stereotype.Component;
  * 键名写错不会报错，只会让引擎静默地拿不到凭据——因此每种类型都配了测试，
  * 断言的是键名本身，而不是「调用了没抛异常」。
  *
+ * <p><b>S3 是唯一需要下发两套键名的一族。</b>规格（Polaris / Iceberg）叫
+ * {@code s3.access-key-id} / {@code s3.secret-access-key}，Paimon 引擎叫
+ * {@code s3.access-key} / {@code s3.secret-key}，两边互不认识；
+ * 只给规格键名，Paimon 拿不到密钥。取舍与机制见 {@link #KEY_S3_ACCESS_ENGINE}。
+ *
  * <p><b>OBS 与 OSS 的键名族不能互相套用。</b>两家云的对象存储都兼容 S3 协议，
  * 容易以为用 {@code s3.*} 或对方的键名都能跑通，实际不行：Paimon 的
  * {@code paimon-obs} 与 {@code paimon-oss} 是两个独立的 FileIO，各认自己的一套键，
@@ -80,9 +85,39 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
     private static final Pattern AZURE_ACCOUNT = Pattern.compile(
             "^[a-zA-Z0-9]+://[^@/]+@([^.@/]+)\\.(?:dfs|blob)\\.core\\.windows\\.net(?:[/:?#]|$)");
 
+    /**
+     * S3 凭据的「规格」键名：Polaris / Iceberg 的叫法。
+     *
+     * <p>规格里 {@code LoadTableResult} 的 {@code credentials} 就写成
+     * {@code s3.access-key-id} / {@code s3.secret-access-key}，客户端按这套名字取值，
+     * 所以这两个键不能少。
+     */
     private static final String KEY_S3_ACCESS = "s3.access-key-id";
 
     private static final String KEY_S3_SECRET = "s3.secret-access-key";
+
+    /**
+     * S3 凭据的「引擎」键名：Paimon 自己的叫法。与上面两个键**必须同时下发**。
+     *
+     * <p>两套名字不是重复，而是分属两个消费方。Paimon 的 {@code paimon-s3}
+     * 拿到令牌后会把所有 {@code s3.*} 键按前缀翻译成 Hadoop 的
+     * {@code fs.s3a.*}（{@code loadHadoopConfigFromContext}：
+     * {@code "fs.s3a." + key.substring("s3.".length())}），再做一次小范围镜像
+     * （{@code MIRRORED_CONFIG_KEYS}）：{@code fs.s3a.access-key → fs.s3a.access.key}、
+     * {@code fs.s3a.secret-key → fs.s3a.secret.key}。
+     *
+     * <p>于是 {@code s3.access-key-id} 只会变成 {@code fs.s3a.access-key-id}——
+     * 一个 Hadoop 根本不认识的键，镜像表里也没有它。结果是密钥被**静默丢弃**：
+     * 引擎退回默认凭据链（环境变量 / 实例身份），报出
+     * {@code NoAuthWithAWSException: No AWS Credentials provided by ...}。
+     * 这个异常类是插件隔离类加载器里的，Spark 上报时序列化不到 driver，
+     * 最终只显示成 {@code UnknownReason}——错误信息与真正的原因完全脱钩。
+     * 同时下发 Paimon 键名，让 {@code fs.s3a.access.key} / {@code fs.s3a.secret.key}
+     * 真正落位，才谈得上「凭据下发」。
+     */
+    private static final String KEY_S3_ACCESS_ENGINE = "s3.access-key";
+
+    private static final String KEY_S3_SECRET_ENGINE = "s3.secret-key";
 
     private static final String KEY_GCS_TOKEN = "gcs.oauth2.token";
 
@@ -160,6 +195,20 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
      * {@code stsUnavailable: true}，于是「填了密钥却收不到密钥」——
      * 一个看起来像功能坏了的静默行为。
      */
+    /**
+     * 写入 S3 密钥：规格键名与引擎键名一起给。
+     *
+     * <p>集中在一处是为了不出现「某一个分支忘了给引擎键名」的情况——
+     * 这类遗漏不会报错，只会让那一条凭据来源在引擎侧静默失效。
+     * 两套名字的由来见 {@link #KEY_S3_ACCESS_ENGINE}。
+     */
+    private static void putS3Secrets(Map<String, String> token, String accessKey, String secretKey) {
+        token.put(KEY_S3_ACCESS, accessKey);
+        token.put(KEY_S3_SECRET, secretKey);
+        token.put(KEY_S3_ACCESS_ENGINE, accessKey);
+        token.put(KEY_S3_SECRET_ENGINE, secretKey);
+    }
+
     private String s3(AwsStorageConfigInfo s3, Map<String, String> token) {
         // 定位配置与密钥有无无关：即使不下发密钥，引擎也需要知道该连哪里
         putIfPresent(token, "s3.region", s3.region());
@@ -169,8 +218,7 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
         }
         StorageConfigs.StaticCredentials own = StorageConfigs.staticCredentials(s3, cipher);
         if (own != null) {
-            token.put(KEY_S3_ACCESS, own.accessKeyId());
-            token.put(KEY_S3_SECRET, own.secretAccessKey());
+            putS3Secrets(token, own.accessKeyId(), own.secretAccessKey());
             return VendedStorageCredential.SOURCE_STATIC_CREDENTIALS;
         }
         if (Boolean.TRUE.equals(s3.stsUnavailable())) {
@@ -180,13 +228,11 @@ public class DefaultStorageCredentialManager implements StorageCredentialManager
         RestServerProperties.Storage.Aws aws = properties.getStorage().getAws();
         RestServerProperties.Storage.Keys named = namedKeys(aws.getStorages(), s3.storageName(), "aws");
         if (named != null) {
-            token.put(KEY_S3_ACCESS, named.getAccessKey());
-            token.put(KEY_S3_SECRET, named.getSecretKey());
+            putS3Secrets(token, named.getAccessKey(), named.getSecretKey());
             return VendedStorageCredential.SOURCE_NAMED_STORAGE_PREFIX + s3.storageName();
         }
         if (configured(aws.getAccessKey(), aws.getSecretKey())) {
-            token.put(KEY_S3_ACCESS, aws.getAccessKey());
-            token.put(KEY_S3_SECRET, aws.getSecretKey());
+            putS3Secrets(token, aws.getAccessKey(), aws.getSecretKey());
             return VendedStorageCredential.SOURCE_CONFIGURATION;
         }
         return VendedStorageCredential.SOURCE_ENVIRONMENT;

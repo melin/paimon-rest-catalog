@@ -398,6 +398,10 @@ class PaimonRestCatalogApiTests {
         assertNotNull(token.token().get("securityToken"));
         assertTrue(token.token().get("accessKeyId").startsWith("PAIMON-"));
         assertTrue(token.expiresAt() > System.currentTimeMillis());
+        // 同一个时刻要同时回规格名与客户端实际读的名字（见 GetTableDataTokenResponse 的注释）：
+        // 少了后者，Paimon 客户端会把有效期读成 0，从而每次文件操作前都重新取一次凭据。
+        assertEquals(token.expiresAt(), token.expiresAtMillis(),
+                "响应要同时给 expiresAt 与 expiresAtMillis");
 
         // 查询鉴权：请求未知列 -> 403
         TableDtos.AuthTableQueryResponse auth = credentialService.auth(PREFIX, database, "orders",
