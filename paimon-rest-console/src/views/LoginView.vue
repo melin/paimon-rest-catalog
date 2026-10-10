@@ -131,7 +131,6 @@
                 v-model="form.username"
                 size="large"
                 autocomplete="username"
-                placeholder="服务端 paimon.rest.auth.console.password.users 里的账号"
                 :prefix-icon="User"
                 @keyup.enter="submitPassword"
               />
@@ -251,7 +250,6 @@
                 size="large"
                 type="password"
                 show-password
-                placeholder="服务端 paimon.rest.auth.tokens 中登记的值"
                 :prefix-icon="Key"
                 @keyup.enter="submitStaticToken"
               />
