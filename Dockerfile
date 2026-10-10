@@ -20,7 +20,7 @@
 # 用镜像自带的 mvn，不用 ./mvnw：wrapper 的 distributionType=only-script 需要联网
 # 下载 Maven 发行包，而这一步在镜像里没有必要——基础镜像已经是 Maven 3.9.x，
 # 与 .mvn/wrapper/maven-wrapper.properties 声明的 3.9.16 同一小版本线。
-FROM maven:3.9-eclipse-temurin-21 AS builder
+FROM maven:3.9-eclipse-temurin-17 AS builder
 
 # 解析依赖用的仓库地址。默认值是 Maven Central 的原始域名，
 # 与 Maven 内置的 repo.maven.apache.org 是同一份内容。
@@ -63,9 +63,22 @@ RUN --mount=type=cache,target=/root/.m2/repository \
 # ---------------------------------------------------------------------------
 # 运行阶段
 # ---------------------------------------------------------------------------
-# Boot 4 要求 JDK 17 起，这里选 21 LTS（本仓库的测试与端到端验收都在 21 上跑过）。
+# Boot 4 要求 JDK 17 起，这里**钉 17**，不要升到 18+。
+#
+# 为什么不能升：JDK 18 引入 JEP 418（InetAddress 的解析器 SPI），
+# InetAddress.loadResolver() 会 ServiceLoader 找 InetAddressResolverProvider。
+# 而 Paimon 2.0.0 的 paimon-s3 插件包把 dnsjava 那个 provider 的声明放在插件根、
+# 实现类放在 META-INF/versions/18/（多版本 jar 布局，解成插件目录后不再生效），
+# 于是 S3FileIO 一旦被使用，PluginFileIO 把线程上下文类加载器切成插件 loader，
+# 那块作用域里**任何** InetAddress 解析都抛 ServiceConfigurationError ——
+# 触发点是 Hadoop MetricsSystemImpl.getHostname()，堆栈里全是 Hadoop 与 JDK 的类，
+# 与 S3 看着毫无关系。后果是对象存储的表一个 schema / 快照文件都写不出去。
+# JDK 17 没有这条 SPI，问题不存在。
+#
+# 这与 AGENTS.md §1 第 1 条（只能用 17 或 21）不冲突：那里说的是**测试**必须 17/21
+# 才能跑 Spark 会话，这里说的是**服务端运行时**必须避开 18+。
 # 不选 alpine：musl 与 glibc 在少数依赖上行为不同，而本镜像并不缺那几 MB。
-FROM eclipse-temurin:21-jre-noble
+FROM eclipse-temurin:17-jre-noble
 
 # curl 不是运行时依赖，只为两件事装：Docker 的 HEALTHCHECK，以及容器内排查
 # （kubectl exec 进容器后能直接 curl 本机端点）。Kubernetes 的探针不依赖它。

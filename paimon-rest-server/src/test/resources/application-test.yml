@@ -8,7 +8,7 @@
 # 同样是 ddl-auto: update），目的是让这次数据源切换不改变测试的行为，
 # 从而能干净地判断回归是否由配置切换引入。
 #
-# 由 5 个 @SpringBootTest 类上的 @ActiveProfiles("test") 激活。
+# 由服务端测试类上的 @ActiveProfiles("test") 激活。
 spring:
   datasource:
     url: jdbc:h2:mem:paimon;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
@@ -18,3 +18,38 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
+
+# 测试仓库另放一处，不共用 application.yml 的 file:///tmp/paimon-warehouse。
+#
+# 为什么必须分开：服务端现在会真的往表目录里写 schema/schema-<n>（见
+# TableMetadataService），而 /tmp/paimon-warehouse 正是文档里手工起实例、
+# 跑 Spark 示例时用的那个仓库。共用会让「跑一遍测试」在别人的演示仓库里
+# 留下一堆 it_*.db / tm_*.db 目录，还可能在同名表上撞出
+# `Schema in filesystem exists` —— 那是测试污染的错，看起来却像功能坏了。
+#
+# ${java.io.tmpdir} 由 Spring 从系统属性解析：仓库路径要随机器变化，
+# 而 application-test.yml 是静态文件，写死一个绝对路径在别的机器上会失败。
+paimon:
+  rest:
+    default-warehouse: "file://${java.io.tmpdir}/paimon-rest-server-tests/warehouse"
+    initial-catalog:
+      warehouse: "file://${java.io.tmpdir}/paimon-rest-server-tests/warehouse"
+
+    # 把落库加密密钥置空，让测试跑在「本部署没有密钥」这个状态下。
+    #
+    # application.yml 里配着一份（本地调试用，已被 git 跟踪），而
+    # StaticCredentialDisabledApiTests 的前提恰恰是**没有**密钥：它要验的是
+    # 「宁可拒绝保存静态凭据，也不明文落库」这个 fail-closed 方向。
+    # 不置空的话那个类在 HEAD 上就不可能通过——它拿到的
+    # staticCredentialsEnabled 是 true、保存静态凭据返回 201，
+    # 两条断言都与配置现状相反，看起来像功能坏了，其实是用例的前提没被满足。
+    #
+    # 只改 test profile，不动 application.yml：那份密钥是给人手工起实例用的，
+    # 而测试必须能在一个「干净部署」的形状下跑。
+    # StaticCredentialApiTests 不吃这个值——它自己在 @SpringBootTest 的
+    # properties 里带一份密钥，因此仍然测得到「配了密钥」的那半边。
+    #
+    # 空串即「关闭」，不是「非法」：CredentialCipher 把留空视为未启用加密，
+    # 因此这里不需要别的占位写法。
+    storage:
+      credential-secret-key: ""

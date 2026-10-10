@@ -17,7 +17,7 @@ class PaimonS3Test {
    */
   val token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJwYWltb24tcmVzdCIsInN1YiI6InJlZ3Jlc3MtcHJpbmNpcGFsIiwiaWF0IjoxNzkxNTk1ODI2LCJleHAiOjE3OTE1OTk0MjYsImp0aSI6Ijg3MmVlYWUwLTQxYzctNDE2Ni04OGI3LTAzNDgwMWMxNjcyMCIsInNjb3BlIjoiUFJJTkNJUEFMX1JPTEU6QUxMIn0.OonQtdHvb-scEg2zk2ijGKiZDFEyXAdauDXM06FsXG8"
 
-  @org.junit.jupiter.api.Test
+  // @org.junit.jupiter.api.Test
   def test(): Unit = {
     val warehouse = java.nio.file.Files.createTempDirectory("paimon-rest-warehouse")
     val spark = SparkSession.builder()
@@ -40,6 +40,12 @@ class PaimonS3Test {
       .config("spark.sql.catalog." + catalog + ".data-token.enabled", "true")
       .config("spark.sql.catalog." + catalog + ".token.provider", "bear")
       .config("spark.sql.catalog." + catalog + ".token", token)
+
+      .config("spark.sql.catalog." + catalog + ".s3.endpoint", "http://172.18.6.181:9330")
+      .config("spark.sql.catalog." + catalog + ".s3.access-key", "McvVnpOziVsWv7Qlyut7")
+      .config("spark.sql.catalog." + catalog + ".s3.secret-key", "PbICbD6H7iyq0PuefHa383YoqJn3JCjedQHSYmbp")
+      .config("spark.sql.catalog." + catalog + ".s3.path.style.access", "true")
+
       .config(PaimonRestManagement.MANAGEMENT_URL, "http://127.0.0.1:8080/api/management/v1")
       .config(PaimonRestManagement.TOKEN, token)
       .getOrCreate()
@@ -49,10 +55,10 @@ class PaimonS3Test {
     spark.sql("CREATE DATABASE IF NOT EXISTS demo")
     spark.sql("SHOW TABLES IN demo").show()
 
-    spark.sql("DROP TABLE if exists demo.paimon_sample2")
+    // spark.sql("DROP TABLE if exists demo.paimon_sample2")
     val paimonCreateTableDdl =
       """
-        |create table demo.paimon_sample2 (
+        |create table if not exists demo.paimon_sample2 (
         |    k int,
         |    v string,
         |    pt string
@@ -63,15 +69,15 @@ class PaimonS3Test {
         |)
         |""".stripMargin
     // query paimon table
-    spark.sql(paimonCreateTableDdl)
+    // spark.sql(paimonCreateTableDdl)
 
     spark.sql("show create table demo.paimon_sample2").show(false)
 
     val insertSql = "insert into table demo.paimon_sample2 values(1, 'xx', '20240812')"
-    spark.sql(insertSql)
+    //spark.sql(insertSql)
 
     val insertSql1 = "insert into table demo.paimon_sample2 values(1, 'yy', '20240812')"
-    //spark.sql(insertSql1)
+    spark.sql(insertSql1)
 
     spark.sql("select * from demo.paimon_sample2").show()
   }

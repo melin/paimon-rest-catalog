@@ -185,10 +185,11 @@ class PaimonRestCatalogApiTests {
                         "fieldNames", List.of("email"))))));
         assertEquals(400, badAction.getStatus());
 
-        // 提交快照
+        // 提交快照。commitIdentifier 取数字：它连同快照原文一起会被写进仓库，
+        // 并被 Paimon 自己的 Snapshot 模型反解（那个字段是 long，字符串型值解析不过）
         TableDtos.Snapshot snapshot = new TableDtos.Snapshot(1, "uuid-1", 1L, 1L,
                 "base.manifest", "delta.manifest", null, "index.manifest",
-                "tester", "commit-1", "APPEND", System.currentTimeMillis(),
+                "tester", "1", "APPEND", System.currentTimeMillis(),
                 Map.of("bucket-0", 12L), 100L, 100L, 0L, 5L, null);
         TableDtos.CommitTableResponse committed = tableService.commit(PREFIX, database, "orders",
                 new TableDtos.CommitTableRequest(created.id(), null, snapshot, null));
@@ -223,7 +224,7 @@ class PaimonRestCatalogApiTests {
         // 第二个快照后回滚到第一个
         TableDtos.Snapshot second = new TableDtos.Snapshot(2, "uuid-2", 2L, 1L,
                 "base2.manifest", "delta2.manifest", null, "index2.manifest",
-                "tester", "commit-2", "APPEND", System.currentTimeMillis(),
+                "tester", "2", "APPEND", System.currentTimeMillis(),
                 Map.of(), 150L, 50L, 0L, 9L, null);
         tableService.commit(PREFIX, database, "orders",
                 new TableDtos.CommitTableRequest(created.id(), "uuid-1", second, null));

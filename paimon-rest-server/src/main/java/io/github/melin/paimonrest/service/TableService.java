@@ -20,6 +20,7 @@ import io.github.melin.paimonrest.dto.TableDtos;
 import io.github.melin.paimonrest.dto.TypeDtos;
 import io.github.melin.paimonrest.support.ApiException;
 import io.github.melin.paimonrest.support.Codecs;
+import io.github.melin.paimonrest.support.Json;
 import io.github.melin.paimonrest.support.Paging;
 import io.github.melin.paimonrest.support.Paths;
 import io.github.melin.paimonrest.support.Patterns;
@@ -33,6 +34,7 @@ import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.JsonNode;
 
 /**
  * 表生命周期：创建 / 注册 / 查询 / 变更 / 重命名 / 删除，以及快照与 schema 版本管理。
@@ -40,6 +42,13 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>schema 每次变更都会写入 {@code paimon_table_schema} 形成历史版本，
  * 表实体上的 {@code schemaId} 指向当前版本，因此 {@code rollback-schema} 可以直接改回历史版本。
  * 快照按 {@code snapshot_id} 单调递增存放，{@code rollback} 会丢弃目标之后的所有快照。
+op *
+ * <p><b>本类只维护「服务端数据库里的」元数据，写入 Paimon 仓库那一步交给
+ * {@link TableMetadataService}。</b>两者必须成对发生，而且顺序不能反：先落库再落仓库，
+ * 才谈得上「失败时数据库一致性有保证」——严格模式下仓库写入失败会让整个事务回滚
+ * （{@code @Transactional} 的方法里抛异常），catalog 里不会留下一张没有 schema 文件的表。
+ * 反过来先写仓库再落库，失败时留下的是仓库里的孤儿目录，而那种残留不会有任何接口
+ * 能把它清理掉。为什么需要写仓库、写的是什么，见 {@link TableMetadataService} 的类注释。
  */
 @Service
 @RequiredArgsConstructor
@@ -47,6 +56,15 @@ public class TableService {
 
     private static final String OPTION_TABLE_TYPE = "type";
     private static final String DEFAULT_TABLE_TYPE = "PAIMON";
+
+    /**
+     * 客户端没送 {@code Snapshot.version} 时的兜底值：Paimon 当前的快照**文件格式版本**。
+     *
+     * <p>这个值是 Paimon 的 {@code Snapshot.CURRENT_VERSION}，它是 {@code protected}，取不到，
+     * 只能写死。正常不会有走到这里的分支——客户端每个快照都会把 {@code version} 序列化出来；
+     * 有兜底只是为了不让手工构造的请求体在库里留下 null。
+     */
+    private static final int SNAPSHOT_FORMAT_VERSION = 3;
 
     private final TableRepository tableRepository;
     private final DatabaseRepository databaseRepository;
@@ -60,6 +78,7 @@ public class TableService {
     private final PartitionService partitionService;
     private final CatalogService catalogService;
     private final RestServerProperties properties;
+    private final TableMetadataService tableMetadataService;
 
     // ------------------------------------------------------------------ 列举
 
@@ -159,10 +178,20 @@ public class TableService {
         table.markCreated(RequestContext.principal(), RequestContext.now());
         tableRepository.save(table);
         saveSchemaVersion(table, 0, schema);
+
+        // 落库之后再落仓库：schema/schema-0 是引擎后续写入该表的前提，
+        // 缺失时的表现是引擎侧一句 Cannot get latest schema（见 TableMetadataService）
+        tableMetadataService.materializeNewTable(table);
     }
 
     /**
      * 注册已存在于对象存储的表：只登记元数据位置，不接管数据。
+     *
+     * <p>刻意不调用 {@link TableMetadataService}：{@code register} 的语义就是
+     * 「仓库里已经有一张表，本服务端只登记它的位置」。往它的目录里写 schema
+     * 等于用这里的空 schema 覆盖那张表的元数据，是数据损坏，不是补全。
+     * 实体上的 {@code external=true} 也把这一点带进了后续所有写入路径，
+     * 因此 alter / rollback-schema 同样不会碰它。
      */
     @Transactional
     public void register(String prefix, String databaseName, TableDtos.RegisterTableRequest request) {
@@ -197,6 +226,8 @@ public class TableService {
         partitionRepository.deleteByTableId(table.getId());
         consumerRepository.deleteByTableId(table.getId());
         tableRepository.delete(table);
+        // 表目录是否一起删由 paimon.rest.table-metadata.purge-on-drop 决定，默认不删
+        tableMetadataService.dropTableDirectory(table);
     }
 
     @Transactional
@@ -244,6 +275,9 @@ public class TableService {
         table.touch(RequestContext.principal(), RequestContext.now());
         tableRepository.save(table);
         saveSchemaVersion(table, schemaId, schema);
+
+        // 数据库里的 schemaId 与仓库里的 schema-<n> 用同一个号，见 TableMetadataService
+        tableMetadataService.materializeSchemaVersion(table, schemaId);
     }
 
     /**
@@ -270,6 +304,9 @@ public class TableService {
         table.touch(RequestContext.principal(), RequestContext.now());
         tableRepository.save(table);
         saveSchemaVersion(table, newSchemaId, Codecs.readSchema(version.getSchemaDoc()));
+
+        // 回滚也是一次向前的新版本（内容取历史版本），仓库里同样写成 schema-<newSchemaId>
+        tableMetadataService.materializeSchemaVersion(table, newSchemaId);
     }
 
     // ------------------------------------------------------------------ 快照
@@ -279,10 +316,37 @@ public class TableService {
      *
      * <p>{@code baseSnapshotUuid} 提供时作为乐观并发控制：与当前最新快照不一致即拒绝提交，
      * 返回 {@code success=false} 交由客户端重试。
+     *
+     * <p><b>入口收的是已解析的请求体，不是 DTO。</b>除了 DTO 里那些要落库的字段，
+     * 还要把 {@code snapshot} 那段 JSON **原文**交给仓库物化——DTO 只覆盖规格建模过的字段，
+     * 而客户端（{@code org.apache.paimon.Snapshot}）还会带 {@code properties}、
+     * {@code operation}、{@code nextRowId} 等，按 DTO 重新拼一份就会丢。理由见
+     * {@link TableMetadataService#materializeSnapshot}。
+     */
+    @Transactional
+    public TableDtos.CommitTableResponse commit(String prefix, String databaseName, String tableName,
+                                                JsonNode body) {
+        return commit(prefix, databaseName, tableName,
+                body == null ? null : Json.read(body.toString(), TableDtos.CommitTableRequest.class),
+                body == null ? null : body.path("snapshot").toString());
+    }
+
+    /**
+     * 兼容入口：调用方在 Java 里直接构造 DTO（服务端内部与测试）。
+     *
+     * <p>快照原文由 DTO 序列化而来，因此只含规格建模过的字段；真正走 HTTP 的那条路
+     * （上面的重载）拿到的是客户端原文。两条路对数据库的影响完全一致，差别只在落到仓库里的
+     * 快照文件有多完整。
      */
     @Transactional
     public TableDtos.CommitTableResponse commit(String prefix, String databaseName, String tableName,
                                                 TableDtos.CommitTableRequest request) {
+        return commit(prefix, databaseName, tableName, request,
+                request == null || request.snapshot() == null ? null : Json.write(request.snapshot()));
+    }
+
+    private TableDtos.CommitTableResponse commit(String prefix, String databaseName, String tableName,
+                                                 TableDtos.CommitTableRequest request, String snapshotDoc) {
         TableEntity table = tableLookup.requireTable(prefix, databaseName, tableName);
         if (request == null || request.snapshot() == null) {
             throw ApiException.badRequest("commit requires a snapshot");
@@ -306,7 +370,9 @@ public class TableService {
         entity.setId(entity.getId() == null ? Paging.newId() : entity.getId());
         entity.setTableId(table.getId());
         entity.setSnapshotId(snapshot.id());
-        entity.setVersion(snapshot.version() != null ? snapshot.version() : nextVersion(table.getId()));
+        // 存的是快照**文件格式版本**（客户端恒送 3），不是自增序号：
+        // 读路径按版本号取快照的是 getVersionSnapshot，而它按「快照 id」查，与这里无关。
+        entity.setVersion(snapshot.version() != null ? snapshot.version() : SNAPSHOT_FORMAT_VERSION);
         entity.setUuid(snapshot.uuid());
         entity.setSchemaId(snapshot.schemaId() != null ? snapshot.schemaId() : table.getSchemaId());
         entity.setBaseManifestList(snapshot.baseManifestList());
@@ -332,6 +398,9 @@ public class TableService {
         table.setLatestSnapshotUuid(snapshot.uuid());
         table.touch(RequestContext.principal(), RequestContext.now());
         tableRepository.save(table);
+
+        // 先落库再落仓库，与 schema 同一顺序（理由见类注释）
+        tableMetadataService.materializeSnapshot(table, snapshot.id(), snapshotDoc);
         return new TableDtos.CommitTableResponse(true);
     }
 
@@ -355,6 +424,9 @@ public class TableService {
         table.setLatestSnapshotUuid(target.getUuid());
         table.touch(RequestContext.principal(), RequestContext.now());
         tableRepository.save(table);
+
+        // 仓库里那些目标之后的快照文件要一起消失，否则绕开服务端的读端会看到回滚前的表
+        tableMetadataService.discardSnapshotsAfter(table, targetSnapshotId);
     }
 
     @Transactional(readOnly = true)
@@ -365,18 +437,49 @@ public class TableService {
         return new TableDtos.GetTableSnapshotResponse(toTableSnapshot(entity));
     }
 
+    /**
+     * 按「版本」取快照，解析顺序与 Paimon REST 客户端一致
+     * （{@code RESTApi.loadSnapshot(identifier, version)} 的 javadoc）：
+     * {@code EARLIEST} 取最早的、{@code LATEST} 取最新的、**数字按快照 id 查**、其余当标签名。
+     *
+     * <p><b>数字指的是快照 id，不是 {@code Snapshot.version}。</b>后者是快照
+     * **文件格式版本**，客户端每个快照都送同一个值（{@code Snapshot.CURRENT_VERSION}，当前是 3），
+     * 把它当查询键会让所有快照命中同一行，于是 {@code SELECT ... VERSION AS OF 3} 返回
+     * id 最小的那个快照——表现是「查出来的不是最新写入的数据，而快照数量又是对的」。
+     * 快照 id 由客户端单调分配（{@code latestSnapshotId + 1}，从 1 起），因此按 id 查
+     * 才与「第 n 个快照」这个直觉一致。
+     */
     @Transactional(readOnly = true)
     public TableDtos.GetVersionSnapshotResponse getVersionSnapshot(String prefix, String databaseName,
                                                                   String tableName, String version) {
         TableEntity table = tableLookup.requireTable(prefix, databaseName, tableName);
-        int parsed;
-        try {
-            parsed = Integer.parseInt(version);
-        } catch (NumberFormatException e) {
-            throw ApiException.badRequest("Snapshot version must be an integer: " + version);
+        if (version == null || version.isBlank()) {
+            throw ApiException.badRequest("Snapshot version is required");
         }
-        TableSnapshotEntity entity = snapshotRepository.findByTableIdAndVersion(table.getId(), parsed)
-                .orElseThrow(() -> ApiException.snapshotNotExist(parsed));
+        String trimmed = version.trim();
+        TableSnapshotEntity entity;
+        if ("LATEST".equalsIgnoreCase(trimmed)) {
+            entity = snapshotRepository.findFirstByTableIdOrderBySnapshotIdDesc(table.getId())
+                    .orElseThrow(() -> ApiException.snapshotNotExist(0));
+        } else if ("EARLIEST".equalsIgnoreCase(trimmed)) {
+            entity = snapshotRepository.findFirstByTableIdOrderBySnapshotIdAsc(table.getId())
+                    .orElseThrow(() -> ApiException.snapshotNotExist(0));
+        } else if (isDigits(trimmed)) {
+            long snapshotId;
+            try {
+                snapshotId = Long.parseLong(trimmed);
+            } catch (NumberFormatException e) {
+                throw ApiException.badRequest("Snapshot id is out of range: " + version);
+            }
+            entity = snapshotRepository.findByTableIdAndSnapshotId(table.getId(), snapshotId)
+                    .orElseThrow(() -> ApiException.snapshotNotExist(snapshotId));
+        } else {
+            // 剩下的一律当标签名。标签本身就是「给某个快照起的名字」，取不到就是 404
+            TagEntity tag = tagRepository.findByTableIdAndTagName(table.getId(), trimmed)
+                    .orElseThrow(() -> ApiException.tagNotExist(trimmed));
+            entity = snapshotRepository.findByTableIdAndSnapshotId(table.getId(), tag.getSnapshotId())
+                    .orElseThrow(() -> ApiException.snapshotNotExist(tag.getSnapshotId()));
+        }
         return new TableDtos.GetVersionSnapshotResponse(toSnapshot(entity));
     }
 
@@ -394,6 +497,25 @@ public class TableService {
     }
 
     // ------------------------------------------------------------------ 辅助
+
+    /**
+     * 是否是一串十进制数字。
+     *
+     * <p>「像不像快照 id」用不着更聪明的判断：客户端的版本串只有
+     * {@code LATEST} / {@code EARLIEST} / 数字 / 标签名四种，数字之外的一律按标签名去查，
+     * 因此这里用 {@code Integer.parseInt} 那种「先试后catch」的写法反而更绕。
+     */
+    private static boolean isDigits(String value) {
+        if (value.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            if (!Character.isDigit(value.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     private Long resolveRollbackTarget(TableEntity table, TableDtos.RollbackTableRequest request) {
         if (request == null) {
@@ -414,12 +536,6 @@ public class TableService {
             return Values.longValue(instant.get("snapshotId"));
         }
         return request.fromSnapshot();
-    }
-
-    private int nextVersion(String tableId) {
-        return snapshotRepository.findFirstByTableIdOrderBySnapshotIdDesc(tableId)
-                .map(entity -> (entity.getVersion() == null ? 0 : entity.getVersion()) + 1)
-                .orElse(1);
     }
 
     private void saveSchemaVersion(TableEntity table, long schemaId, TypeDtos.Schema schema) {

@@ -8,19 +8,21 @@ import org.junit.jupiter.api.{AfterEach, Assumptions, BeforeEach, Test}
 import java.util.UUID
 
 /**
- * 对着一个**真实服务端**跑一遍「建表 → 读元数据」，并把 `INSERT` 停下来的位置钉住。
+ * 对着一个**真实服务端**跑一遍「建表 → 读元数据 → 写入 → 读回数据」，
+ * 顺带证明客户端只凭服务端下发的凭据就能碰到仓库。
  *
  * <p><b>这个类解决什么问题。</b>仓库里其它 live 用例要么只验管理语句
  * （ManagementSqlLiveServerTests），要么只验建表（PaimonTableDdlTests）。
  * 这里走的是另一条链路：**catalog 的 warehouse 落在对象存储上时，
  * 客户端只凭服务端下发的凭据，能不能碰到那个仓库。**
  *
- * <p><b>为什么把「失败」也当成断言对象。</b>本服务端不做数据面写入
- * （见 `docs/spark-paimon-rest-e2e.md` 第 4 节），`INSERT` 必然失败。
- * 但失败**停在哪儿**很有信息量：停在「仓库里没有 schema 文件」说明客户端已经
- * 成功拿到凭据并连上了对象存储；停在 `UnsupportedSchemeException` 说明类路径里
- * 缺 FileIO 实现；停在一句 `UnknownReason` 说明凭据没送到客户端手上。
- * 只断言「失败了」是压不住这些的，断在失败链的哪一步才压得住。
+ * <p><b>为什么这条链路值得单独测。</b>写入必然要碰 `s3://` 上的
+ * `<table>/schema` 与 `<table>/snapshot`，因此它是客户端第一次真正访问对象存储的地方。
+ * 失败停在哪一步恰好能区分三种病因：停在
+ * `UnsupportedSchemeException` 说明类路径里缺 FileIO 实现（见 1.1）；
+ * 停在一句 `UnknownReason` 说明凭据没按引擎认的键名送到客户端；
+ * 停在 `Cannot get latest schema for table` 说明服务端没把 schema 物化到表目录。
+ * 三者都齐，写入就会成功——这正是下面这条用例断言的东西。
  *
  * <p>默认跳过，需要显式指向一个已启动的服务端：
  *
@@ -117,22 +119,25 @@ class PaimonRestCatalogTest {
   }
 
   /**
-   * `INSERT` 要一路走到「仓库里没有 Paimon 的 schema 文件」为止，
-   * 而不是卡在类路径或凭据上。
+   * `INSERT` 能写完并把数据读回来，中途不卡在类路径或凭据上。
    *
-   * <p>这条断言同时压住两件事：`s3://` 的 FileIO 实现要在类路径里（缺了报
-   * `UnsupportedSchemeException`），服务端下发的对象存储凭据要按引擎认的键名
-   * 送达（没送到时客户端退回默认凭据链，报 `NoAuthWithAWSException`；
-   * 而这个异常类来自 `paimon-s3` 的隔离类加载器，Spark 反序列化不到，
-   * 最终在用户面前只剩一句 `UnknownReason`，看不出任何东西）。
-   * 两样都齐，报错才会恰好停在文档第 4 节记录的那一步。
+   * <p>这条曾经是「数据面缺口」的守卫用例，断言的是写入**失败**、且失败恰好停在
+   * 「仓库里没有 Paimon 的 schema 文件」那一步。服务端补上 schema 物化之后它按设计翻转：
+   * 现在断言写入成功。翻转本身就是当初写它的用意——边界一移动就先响。
    *
-   * <p>数据面补齐之后这条会失败，那时它应该改成断言写入成功并读回数据。
-   * 与 `PaimonTableDdlTests.createTableAsSelectNeedsADataPlaneTheCatalogDoesNotHave`
-   * 是同一种用法：边界被移动了就提醒改动者回来同步文档。
+   * <p>它同时仍然压着另外两件事，只是形式从「断言失败链的内容」变成了「断言不失败」：
+   * `s3://` 的 FileIO 实现要在类路径里（缺了报 `UnsupportedSchemeException`），
+   * 服务端下发的对象存储凭据要按引擎认的键名送达（没送到时客户端退回默认凭据链，
+   * 报 `NoAuthWithAWSException`；而这个异常类来自 `paimon-s3` 的隔离类加载器，
+   * Spark 反序列化不到，最终在用户面前只剩一句 `UnknownReason`，看不出任何东西）。
+   * 三种病因里任何一种存在，下面的写入都不会成功。
+   *
+   * <p>断言到「读回来的值与原值逐列相等」为止，不停在「INSERT 没抛异常」：
+   * 写入返回成功但元数据不一致（例如 schema 文件与快照对不上）时，
+   * 只有读一遍才能发现。
    */
   @Test
-  def writeStopsAtTheDocumentedDataPlaneGap(): Unit = {
+  def insertWritesThroughAndIsReadable(): Unit = {
     val table = "orders"
     sql(s"CREATE DATABASE $catalog.$database")
     sql(s"CREATE TABLE $catalog.$database.$table (" +
@@ -140,16 +145,13 @@ class PaimonRestCatalogTest {
       "PARTITIONED BY (pt) " +
       "TBLPROPERTIES ('primary-key' = 'k,pt', 'bucket' = '1')")
 
-    val error = assertThrows(classOf[RuntimeException], () =>
-      sql(s"INSERT INTO $catalog.$database.$table VALUES (1, 'x', '20240812')"))
+    sql(s"INSERT INTO $catalog.$database.$table VALUES (1, 'x', '20240812')")
 
-    val chain = causeChain(error)
-    assertFalse(chain.contains("UnsupportedSchemeException"),
-      s"客户端类路径里缺 s3:// 的 FileIO 实现（paimon-s3）。报错链: $chain")
-    assertTrue(chain.contains("Cannot get latest schema for table"),
-      "报错链应与 docs/spark-paimon-rest-e2e.md 第 4 节一致。" +
-        "若这里是 UnknownReason，多半是服务端没把对象存储凭据按引擎键名下发。" +
-        s"实际报错链: $chain")
+    val rows = sql(s"SELECT k, v, pt FROM $catalog.$database.$table")
+    assertEquals(1, rows.length, "应读回恰好一行")
+    assertEquals(1, rows(0).getInt(0))
+    assertEquals("x", rows(0).getString(1))
+    assertEquals("20240812", rows(0).getString(2))
   }
 
   // ------------------------------------------------------------------ 辅助
@@ -170,24 +172,6 @@ class PaimonRestCatalogTest {
 object PaimonRestCatalogTest {
 
   private def catalog: String = LiveSparkSession.catalog
-
-  /**
-   * 把异常链上每一层的类型与消息拼成一段文本，供断言检索。
-   *
-   * <p>为什么不只看 `getMessage`：Paimon / Spark 的报错是层层包装的，
-   * 关键原因往往埋在 `Caused by` 里，外层只留一句看不出所以然的话。
-   * 这里刻意不取栈轨迹——太长，而且含机器相关的路径。
-   */
-  private def causeChain(error: Throwable): String = {
-    val messages = scala.collection.mutable.ArrayBuffer.empty[String]
-    var current = error
-    // 自引用（getCause 返回自己）会让循环停不下来，一并挡掉
-    while (current != null && messages.length < 20 && current != current.getCause) {
-      messages += s"${current.getClass.getName}: ${current.getMessage}"
-      current = current.getCause
-    }
-    messages.mkString("\n")
-  }
 
   /**
    * 直接读服务端的表元数据，取 `path`。

@@ -61,6 +61,8 @@ public class RestServerProperties {
 
     private final FileIo fileIo = new FileIo();
 
+    private final TableMetadata tableMetadata = new TableMetadata();
+
     /** Bearer 鉴权开关。关闭时所有请求以 {@code principal} 身份通过。 */
     @Getter
     @Setter
@@ -660,5 +662,74 @@ public class RestServerProperties {
     public static class FileIo {
 
         private String type = "default";
+    }
+
+    /**
+     * {@code paimon.rest.table-metadata.*}：是否把表元数据（schema 与快照）物化到 Paimon 仓库里。
+     *
+     * <p><b>为什么需要这一层，而不是像 HiveCatalog 那样理所当然地写。</b>Paimon 的
+     * REST Catalog 客户端是瘦客户端：{@code RESTCatalog.createTable} 只把 schema
+     * POST 给服务端，表目录里的 {@code schema/schema-<n>} 从来不由客户端写。
+     * 「拥有表的目录实现」里这一步落在 {@code SchemaManager.createTable}
+     * （{@code HiveCatalog.createTableImpl} 就是这么调的），换成 REST 形态之后
+     * 这份责任移到了服务端。缺了它，引擎建完表能读 schema，却写不进去——
+     * {@code FileStoreCommitImpl} 提交快照前要读 {@code schema/schema-<n>} 取 schemaId，
+     * 读不到就抛 {@code Cannot get latest schema for table <表名>}。
+     *
+     * <p><b>快照是同一件事的另一半。</b>{@code RESTCatalog.supportsVersionManagement()} 恒为
+     * {@code true}，于是 {@code CatalogEnvironment.snapshotCommit} 选的是
+     * {@code CatalogSnapshotCommit}——把 {@code Snapshot} 对象 POST 给服务端，客户端那份写
+     * {@code snapshot/snapshot-<n>} 的代码（{@code RenamingSnapshotCommit}）根本不会被实例化。
+     * 服务端不写，仓库里就永远没有快照文件；而这种缺失比 schema 那次更难发现：REST 的读路径
+     * 也走服务端（{@code SnapshotLoaderImpl} 查的就是本服务端的数据库），因此用 catalog 读写
+     * 一切正常，只有绕开服务端直接看仓库时才会露出来。
+     */
+    @Getter
+    @Setter
+    public static class TableMetadata {
+
+        /**
+         * 是否在建表 / 改表 / 回滚 schema 时写 {@code schema/schema-<n>}，
+         * 以及在提交快照 / 回滚快照时写 {@code snapshot/snapshot-<n>}。
+         *
+         * <p>默认开启：不写这些文件，建出来的表就是「只可读、不可写」的半成品，
+         * 而调用方从接口的成功响应上看不出任何异常——这是本项目里最容易
+         * 被误判成「引擎坏了」的一种状态。关掉它只对一种部署有意义：
+         * 服务端刻意不持有仓库写权限，表的物理目录由另一条链路（例如先在
+         * 文件系统目录里建好表再 {@code register} 进来）负责。
+         */
+        private boolean enabled = true;
+
+        /**
+         * 物化失败时是否让请求失败。
+         *
+         * <p>默认 {@code false}（尽力而为）：服务端写仓库需要三样东西同时到位——
+         * 对应的 FileIO 实现（{@code file://} 内置，{@code s3://} 等由部署方放进
+         * Paimon 插件目录）、能访问该仓库的凭据、以及到该端点的网络。任缺一项，
+         * 严格失败会让**建表整体不可用**：那是一个比「表暂时写不进去」
+         * 严重得多的回归，而且影响面扩到了只用元数据的调用方。
+         *
+         * <p>置 {@code true} 时写入失败以 500 返回，事务回滚，catalog 里不会留下
+         * 半成品表。适合「宁可建不出表，也不要有表写着写着写不进去」的部署；
+         * 也是把这类配置问题从「一条 WARN 日志」变成「构建/验收直接红」的开关。
+         */
+        private boolean failOnError = false;
+
+        /**
+         * {@code DROP TABLE} 时是否连表目录一起删除。
+         *
+         * <p>默认 {@code false}：删数据不可逆，而本项配置的默认值就是
+         * 「谁都没看过这份文档时会发生什么」的那一个，因此不给它一个会删数据的默认。
+         *
+         * <p>关着的代价要说清楚：Paimon 的 schema 文件留在原处，于是
+         * 「删表 → 同名重建」会撞上 {@code Schema in filesystem exists, creation
+         * is not allowed.}（这句话来自 {@code SchemaManager.createTable}）。
+         * 处理方式二选一：把这一项打开，或手工清掉旧表目录。
+         *
+         * <p>开着时只删**非外部表**的目录：{@code register} 进来的表（
+         * {@code external=true}）位置不归本服务端所有，删它等于删别人的数据。
+         * 这一点与 Paimon 自己的 {@code HiveCatalog.dropTable} 一致。
+         */
+        private boolean purgeOnDrop = false;
     }
 }

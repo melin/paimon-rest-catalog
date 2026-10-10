@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import tools.jackson.databind.JsonNode;
 
 /**
  * 表端点：列举、创建、注册、变更、重命名、删除，以及提交、回滚、快照与数据访问授权。
@@ -111,12 +112,20 @@ public class TableController {
 
     // ------------------------------------------------------------------ 提交与回滚
 
+    /**
+     * 提交快照。
+     *
+     * <p>收到的请求体按原始 JSON 树接手、而不是直接绑成 {@code CommitTableRequest}：
+     * 服务端除了落库，还要把 {@code snapshot} 那段原文写进仓库，绑成 DTO 会丢掉规格没建模过的字段
+     * （客户端送的是完整的 Paimon {@code Snapshot}）。报文形状不变，只是这一层不再替服务端
+     * 丢掉它看不见的字段。
+     */
     @PostMapping("/databases/{database}/tables/{table}/commit")
     public TableDtos.CommitTableResponse commitTable(@PathVariable String prefix,
                                                      @PathVariable String database,
                                                      @PathVariable String table,
-                                                     @RequestBody(required = false) TableDtos.CommitTableRequest request) {
-        return tableService.commit(prefix, database, table, request);
+                                                     @RequestBody(required = false) JsonNode body) {
+        return tableService.commit(prefix, database, table, body);
     }
 
     @PostMapping("/databases/{database}/tables/{table}/rollback")

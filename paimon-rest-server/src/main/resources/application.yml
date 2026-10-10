@@ -51,6 +51,44 @@ paimon:
     # 分页默认值与上限
     default-page-size: 100
     max-page-size: 1000
+
+    # -------------------------------------------------------------------------
+    # 表元数据物化：把 schema 与快照写进 Paimon 表目录
+    # （<warehouse>/<db>.db/<表>/schema/schema-<n> 与 snapshot/snapshot-<n>）。
+    #
+    # 为什么服务端要管这件事：Paimon 的 REST Catalog 客户端是瘦客户端——
+    # RESTCatalog.createTable 只把 schema POST 给服务端，物理目录从来不由客户端写；
+    # 提交快照同理，RESTCatalog.supportsVersionManagement() 恒为 true，
+    # 客户端走 CatalogSnapshotCommit 把快照 POST 给服务端，自己那份写 snapshot-<n>
+    # 的代码（RenamingSnapshotCommit）根本不会被实例化。
+    # 对照之下 HiveCatalog（自己就是表的拥有者）会在 createTableImpl 里调
+    # SchemaManager.createTable 写 schema 文件。换到 REST 形态，这份责任就落到了服务端。
+    #
+    # 不写会怎样：引擎提交快照前要读 schema/schema-<n> 取 schemaId，读不到就抛
+    # Cannot get latest schema for table <表名> 并回滚，留下已经写好的数据文件当孤儿。
+    # 快照文件的缺失更难发现：REST 的读路径也走服务端（SnapshotLoaderImpl 查的就是
+    # 本服务端的数据库），所以用 catalog 读写一切正常，只有绕开服务端直接看仓库
+    # 才会发现那是一张没有快照的表。
+    #
+    # 开关的意义与取舍见 docs/spark-paimon-rest-e2e.md 第 4 节，逐项说明见 README 第 5 节。
+    # -------------------------------------------------------------------------
+    table-metadata:
+      # 是否物化。默认开启。external=true 的表（register 进来的）始终不物化：
+      # 它的位置不归本服务端所有，往里写 schema / 快照是数据损坏而不是补全。
+      enabled: true
+      # 物化失败时是否让请求失败（500 且事务回滚）。
+      # 默认 false（尽力而为）：服务端写仓库需要 FileIO 实现、凭据、网络三者同时到位，
+      # 任缺一项，严格失败会让**建表整体不可用**——影响面比「表暂时写不进去」大得多。
+      # 置 true 适合「宁可建不出表，也不要有表写着写着写不进去」的部署。
+      # 注意：仓库在 s3:// / obs:// / oss:// 上时，服务端自己也要有对应 scheme 的
+      # FileIO 实现（paimon-core 只带 file / hdfs / viewfs），否则这里一直是 WARN。
+      fail-on-error: false
+      # DROP TABLE 时是否连表目录一起删除。
+      # 默认 false：删数据不可逆，默认值得是「谁都没看过这份文档时会发生什么」的那一个。
+      # 代价是「删表 -> 同名重建」会撞 Schema in filesystem exists, creation is not
+      # allowed.，此时要么打开这一项，要么手工清掉旧表目录。
+      purge-on-drop: false
+
     auth:
       # true 时所有 /v1/**、/api/catalog/v1/**、/api/management/v1/**、/api/console/v1/** 都要求
       # Authorization: Bearer <token>（例外只三条：登录引导 /api/console/v1/auth、

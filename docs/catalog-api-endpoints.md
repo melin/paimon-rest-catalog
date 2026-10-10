@@ -124,5 +124,13 @@ Paimon Rest Catalog API 在本服务端的全部 **60 个端点**，按资源分
 
 覆盖率不靠人工比对：`scripts/api-sweep.sh` 对运行中的实例逐个调用这 60 个 operation
 （会创建并清理 database `sales`，因此要求目标实例为初始状态）。
-本服务端只提供元数据、不做数据面写入，`commit` 之类的边界见
-[`../README.md`](../README.md) 第 6 节「实现说明与已知边界」。
+本服务端在元数据之外还会把 schema 与快照物化到 Paimon 表目录
+（`<table>/schema/schema-<n>`、`<table>/snapshot/snapshot-<n>`），因此写入可用，
+绕开服务端直读仓库也能看到完整元数据；`commit` / `rollback` 的物化行为与三档开关见
+[`spark-paimon-rest-e2e.md`](spark-paimon-rest-e2e.md) 第 4 节，
+其余边界见 [`../README.md`](../README.md) 第 6 节「实现说明与已知边界」。
+
+`GET /v1/{prefix}/databases/{db}/tables/{t}/snapshots/{version}` 里 `version` 的解析顺序与
+Paimon 客户端一致（见 `RESTApi.loadSnapshot(identifier, version)` 的契约）：
+`EARLIEST` 取最早、`LATEST` 取最新、**数字即快照 id**、其余按标签名查。
+数字不是 `Snapshot.version`——那是快照文件格式版本，客户端每个快照都送同一个值。

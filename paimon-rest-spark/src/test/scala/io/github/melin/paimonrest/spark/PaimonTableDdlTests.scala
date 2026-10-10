@@ -52,17 +52,16 @@ import scala.collection.JavaConverters._
  * </ol>
  * 少了第二层，服务端完全可以「建表返回成功但什么都没存」，而第一层照样通过。
  *
- * <p><b>已知边界：写入还不可用。</b>`INSERT INTO paimon.&lt;db&gt;.&lt;table&gt;` 与
- * `CREATE TABLE ... AS SELECT` 都会在提交 snapshot 时报
- * `Cannot get latest schema for table`：Paimon 的写入路径要先读
- * `GET /v1/{prefix}/databases/{db}/tables/{table}/snapshot` 拿最新 schema，
- * 而服务端尚未实现 snapshot 元数据托管。建表本身不受影响，
- * 因此本测试类的断言止于「建表 + 结构与选项正确」。
+ * <p><b>写入曾经不可用，现已打通。</b>`INSERT INTO paimon.&lt;db&gt;.&lt;table&gt;` 与
+ * `CREATE TABLE ... AS SELECT` 一度都在提交 snapshot 时报
+ * `Cannot get latest schema for table`：引擎提交前要在仓库里读
+ * `&lt;table&gt;/schema/schema-&lt;n&gt;`，而服务端当时只把 schema 存进自己的数据库、
+ * 没有把它物化到表目录，那个文件根本不存在。服务端补上物化之后（见
+ * {@code TableMetadataService}），写入链路随之通畅。
  *
- * <p>这处缺口由
- * {@link #createTableAsSelectNeedsADataPlaneTheCatalogDoesNotHave} 一道**守卫用例**
- * 记录：它断言的是「当前不可用」，而不是「期望不可用」。等服务端补上数据面后这条会失败，
- * 提醒同步更新 {@code docs/spark-paimon-rest-e2e.md} 第 4 节。
+ * <p>{@link #createTableAsSelectWritesDataAndReadsItBack} 现在断言的是写入**成功**。
+ * 它在缺口存在时是被刻意写成「断言不可用」的**守卫用例**——边界一移动就先响，
+ * 提醒回来更新 {@code docs/spark-paimon-rest-e2e.md} 第 4 节。那次翻转已经发生。
  */
 class PaimonTableDdlTests {
 
@@ -283,28 +282,63 @@ class PaimonTableDdlTests {
     assertTrue(error.getMessage.contains(missing), error.getMessage)
   }
 
-  // ------------------------------------------------------------------ 已知边界
+  // ------------------------------------------------------------------ 写入链路
 
   /**
-   * `CREATE TABLE ... AS SELECT` 需要数据面，本服务端目前不提供。
+   * `CREATE TABLE ... AS SELECT` 能写完并把数据读回来。
    *
-   * <p>这条是**守卫用例**：它断言「当前不可用」而不是「期望不可用」。等数据面补齐后
-   * 它会失败，从而提醒改动者同步更新 {@code docs/spark-paimon-rest-e2e.md} 第 4 节。
+   * <p>这条曾经是「数据面缺口」的守卫用例，断言的是写入**失败**、且失败停在
+   * `Cannot get latest schema for table`。服务端补上 schema 物化（把
+   * `schema/schema-<n>` 写进表目录）之后，它按设计翻转成断言写入成功——
+   * 这正是当初把它写成守卫用例的用意：边界一移动，它就先响。
    *
-   * <p>除报错链之外还断言了失败是**原子**的：写入阶段失败也不会把一张空表留在
-   * catalog 里。这一点光看报错看不出来，而对使用者是要紧的——它决定失败之后要不要
-   * 手工清理。
+   * <p>断言分三层，缺一层都压不住回归：
+   *
+   * <ol>
+   *   <li>CTAS 本身不抛异常；
+   *   <li>`SELECT` 能把数据读回来——读路径要在仓库里找到那个 schema 文件与刚提交的
+   *       快照，能读出数据就说明两边都齐；
+   *   <li>catalog 里表还在（对照之下，缺口时期失败会让这张表根本建不出来）。
+   * </ol>
+   *
+   * <p>注意这里**不**断言失败是原子的。原子性在缺口时期是要紧的（那时写入必然失败，
+   * 决定失败后要不要手工清理），现在写入不再失败，那条断言就没有对象了。
    */
   @Test
-  def createTableAsSelectNeedsADataPlaneTheCatalogDoesNotHave(): Unit = {
+  def createTableAsSelectWritesDataAndReadsItBack(): Unit = {
     val table = "ctas"
-    val error = assertThrows(classOf[RuntimeException], () =>
-      sql(s"CREATE TABLE $catalog.$database.$table USING paimon AS SELECT 1L AS id, 'x' AS name"))
+    sql(s"CREATE TABLE $catalog.$database.$table USING paimon AS SELECT 1L AS id, 'x' AS name")
 
-    assertTrue(causeChainContains(error, "Cannot get latest schema for table"),
-      "报错链应与 docs/spark-paimon-rest-e2e.md 第 4 节一致，实际: " + error.getMessage)
-    assertFalse(sql(s"SHOW TABLES IN $catalog.$database").exists(_.getString(1) == table),
-      "写入失败后不应把空表留在 catalog 里")
+    val rows = sql(s"SELECT id, name FROM $catalog.$database.$table")
+    assertEquals(1, rows.length, "CTAS 应写入恰好一行")
+    assertEquals(1L, rows(0).getLong(0))
+    assertEquals("x", rows(0).getString(1))
+
+    assertTrue(sql(s"SHOW TABLES IN $catalog.$database").exists(_.getString(1) == table),
+      "CTAS 成功之后表应留在 catalog 里")
+  }
+
+  /**
+   * `INSERT` 能写入分区主键表，并按分区键读回。
+   *
+   * <p>与上一条互补：CTAS 走的是「建表 + 写」的合并路径，这里走的是「先建表、再单独写」，
+   * 是使用者最常走的路径。也顺带覆盖分区表——分区列的写入要在仓库里按分区建目录，
+   * 比非分区表多一层。
+   */
+  @Test
+  def insertIntoPartitionedKeyTableIsReadable(): Unit = {
+    val table = "pk_write"
+    sql(s"CREATE TABLE $catalog.$database.$table (" +
+      "k INT, v STRING, pt STRING) USING paimon " +
+      "PARTITIONED BY (pt) TBLPROPERTIES ('primary-key' = 'k,pt', 'bucket' = '1')")
+
+    sql(s"INSERT INTO $catalog.$database.$table VALUES (1, 'x', '20240812')")
+
+    val rows = sql(s"SELECT k, v, pt FROM $catalog.$database.$table")
+    assertEquals(1, rows.length)
+    assertEquals(1, rows(0).getInt(0))
+    assertEquals("x", rows(0).getString(1))
+    assertEquals("20240812", rows(0).getString(2))
   }
 
   // ------------------------------------------------------------------ 辅助
@@ -333,24 +367,6 @@ class PaimonTableDdlTests {
       .filterNot(_.getString(0).startsWith("#"))
       .map(row => row.getString(0) -> (row.getString(1), row.getString(2)))
       .toMap
-
-  /**
-   * 沿 cause 链找片段。
-   *
-   * <p>Paimon 把真实原因埋在若干层 `RuntimeException` 之下，外层 message 只说「提交快照
-   * 时出错」，`getMessage` 因此看不到关键信息。
-   */
-  private def causeChainContains(error: Throwable, fragment: String): Boolean = {
-    var current: Throwable = error
-    while (current != null) {
-      val message = current.getMessage
-      if (message != null && message.contains(fragment)) {
-        return true
-      }
-      current = current.getCause
-    }
-    false
-  }
 
   /** 直接读服务端的表元数据——只有这一层能证明元数据真的落了库。 */
   private def serverTable(db: String, table: String): JsonNode = {

@@ -13,7 +13,8 @@ public interface TableSnapshotRepository extends JpaRepository<TableSnapshotEnti
 
     Optional<TableSnapshotEntity> findFirstByTableIdOrderBySnapshotIdDesc(String tableId);
 
-    Optional<TableSnapshotEntity> findByTableIdAndVersion(String tableId, int version);
+    /** {@code EARLIEST}：按快照 id 取最早的那个。 */
+    Optional<TableSnapshotEntity> findFirstByTableIdOrderBySnapshotIdAsc(String tableId);
 
     List<TableSnapshotEntity> findAllByTableIdOrderBySnapshotIdDesc(String tableId);
 

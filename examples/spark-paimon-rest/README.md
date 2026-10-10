@@ -132,12 +132,16 @@ SQL 与报错对照见 [`../../docs/spark-paimon-rest-e2e.md`](../../docs/spark-
 
 ## 示例到哪一步为止
 
-**建表与读元数据。写入不在范围内。**
+**建表、读元数据、写入与读回数据。**
 
-`INSERT` 与 CTAS 目前不可用：服务端还没有托管 Paimon 的 snapshot 元数据，
-写入路径会在提交快照时报 `Cannot get latest schema for table` 而失败
-（失败是原子的，不会在 catalog 里留下空表）。这是服务端的已知缺口，
-不是配置问题——换连接方式也不会好。
+`INSERT` 与 CTAS 曾经不可用：引擎提交快照前要在仓库里读 `<table>/schema/schema-<n>`
+取 schemaId，而服务端当时只把 schema 存进自己的数据库、没有物化到表目录，于是报
+`Cannot get latest schema for table`。服务端补上物化之后这条链路已经打通，
+本文档与子目录里的示例都可以照跑到写入与读回。
+
+提醒一条运维上的前提：仓库在 `s3://`（或 `obs://` / `oss://`）上时，**服务端自己**
+也要有对应 scheme 的 FileIO 实现，否则物化会失败、报错又回到上面那一句。
+详见 [`../../docs/spark-paimon-rest-e2e.md`](../../docs/spark-paimon-rest-e2e.md) 第 4.2 节。
 
 ---
 

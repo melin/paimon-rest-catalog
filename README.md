@@ -78,7 +78,20 @@ Maven 坐标与包名：`groupId` 为 `io.github.melin`，三个 artifact 分别
 
 ## 2. 快速开始
 
-前置条件：**JDK 17 或 21**；运行服务端需要一个 MySQL 8.0 实例。
+前置条件：构建与测试用 **JDK 17 或 21**；**运行服务端必须用 JDK 17**（避开 18 及以上）；
+运行服务端需要一个 MySQL 8.0 实例。
+
+> **运行服务端不能用 18 及以上，只能用 17。** JDK 18 引入 JEP 418（`InetAddress` 的解析器
+> SPI），`InetAddress.loadResolver()` 会 `ServiceLoader` 找一个
+> `InetAddressResolverProvider`。而 Paimon 2.0.0 的 `paimon-s3` 插件包把 dnsjava 那个
+> provider 的**声明**放在插件根、**实现类**放在 `META-INF/versions/18/`（多版本 jar 布局，
+> 解成插件目录后不再生效）；`PluginFileIO` 每次 IO 都把线程上下文类加载器切成插件 loader，
+> 于是那块作用域里**任何** `InetAddress` 解析都抛
+> `ServiceConfigurationError: ... DnsjavaInetAddressResolverProvider not found`。
+> 触发点是 Hadoop `MetricsSystemImpl.getHostname()`，堆栈里全是 Hadoop 与 JDK 的类，
+> 与 S3 看着毫无关系；后果是**对象存储的表一个 schema / 快照文件都写不出去**
+> （表现为「用 REST catalog 读写都正常，但桶里没有 `schema/` 与 `snapshot/`」）。
+> JDK 17 没有这条 SPI，问题不存在。`Dockerfile` 两个阶段都钉在 17 就是为了这个。
 
 > **构建与测试必须用 17 或 21，不能用 24 及以上。** Spring Boot 4 只要求 17+，
 > 但 Spark 3.5 建测试会话时要经过 Hadoop 的 `UserGroupInformation.getCurrentUser()`，
@@ -115,13 +128,14 @@ mysql -h 127.0.0.1 -u root -p < sql/schema-mysql.sql
 # 全量构建
 JAVA_HOME=/path/to/jdk-21 ./mvnw -DskipTests install
 
-# 运行全部测试（服务端 258 + Spark 76，共 334 个用例）
+# 运行全部测试（服务端 267 + Spark 79，共 346 个用例）
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
 
 # 启动服务端（默认 8080 端口，连 MySQL，预置 catalog prefix=paimon 与 database=default）
-JAVA_HOME=/path/to/jdk-21 ./mvnw -pl paimon-rest-server spring-boot:run
+# 这里必须是 17：运行服务端要避开 JDK 18+ 的 InetAddress 解析器 SPI，理由见本节开头
+JAVA_HOME=/path/to/jdk-17 ./mvnw -pl paimon-rest-server spring-boot:run
 
-# 打包后直接运行
+# 打包后直接运行（同样用 17 起的 JDK）
 java -jar paimon-rest-server/target/paimon-rest-server-0.0.1-SNAPSHOT.jar
 ```
 
@@ -308,6 +322,18 @@ Catalog 侧与鉴权：
 | `paimon.rest.auth.console.oidc.*` | 关闭 | 外部身份提供方（OIDC + PKCE）登录，见 [`console-auth.md`](docs/console-auth.md) |
 | `paimon.rest.credential.ttl-seconds` | `3600` | 数据访问令牌有效期 |
 
+表元数据物化（把 schema 写进 Paimon 表目录，见
+[`docs/spark-paimon-rest-e2e.md`](docs/spark-paimon-rest-e2e.md) 第 4 节）：
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `paimon.rest.table-metadata.enabled` | `true` | 建表 / 改表 / 回滚 schema 时是否写 `<table>/schema/schema-<n>`，以及提交 / 回滚快照时是否写 `<table>/snapshot/snapshot-<n>`。关掉只对「服务端刻意不持有仓库写权限」的部署有意义：此时用 REST catalog 读写仍正常（读路径也走服务端），但绕开服务端直接看仓库是一张没有元数据的表 |
+| `paimon.rest.table-metadata.fail-on-error` | `false` | 物化失败时是否让请求失败（500 且事务回滚）。默认尽力而为，只记 WARN；打开后建表与提交快照会因仓库不可写而直接失败，适合「宁可建不出表，也不要有表写着写着写不进去」的部署 |
+| `paimon.rest.table-metadata.purge-on-drop` | `false` | `DROP TABLE` 时是否连表目录一起删。默认只删元数据、保留数据；关着时「删表 → 同名重建」会撞 `Schema in filesystem exists, creation is not allowed.`，需手工清目录或把这一项打开。只删非外部表 |
+
+仓库在对象存储上时，服务端自己也需要对应 scheme 的 FileIO 实现
+（`paimon-core` 只带 `file` / `hdfs` / `viewfs`），详见上述文档第 4.2 节。
+
 管理面授权（RBAC）：
 
 | 配置 | 默认值 | 说明 |
@@ -485,12 +511,16 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
     schema 文本极大，需要留意这一上限。
 16. **MySQL 上的布尔列是 `bit`**。Hibernate 把 Java `boolean` 映射为 MySQL 的 `bit`，
     功能正常但与多数人手写的 `tinyint(1)` 不同，写外部 SQL 时注意。
-17. **本服务端只提供元数据，不做数据面写入**。建库建表、读元数据、删除都可用；
-    `INSERT` / `CREATE TABLE ... AS SELECT` 不可用——Paimon 客户端会正常把数据文件写进仓库，
-    但在提交快照时找不到 Paimon 自己维护的 `schema/schema-<n>` 文件
-    （报 `Cannot get latest schema for table <表名>`）。补齐它需要在服务端引入
-    Paimon 核心与 FileIO，在仓库里物化 schema 与 snapshot，当前不在范围内。
-    边界与报错链见 [`docs/spark-paimon-rest-e2e.md`](docs/spark-paimon-rest-e2e.md) 第 4 节。
+17. **服务端不只存元数据，还把 schema 与快照物化到 Paimon 表目录**。建库建表、读元数据、
+    删除、写入（`INSERT` / `CREATE TABLE ... AS SELECT`）都可用。写入之所以曾经不可用，
+    是因为引擎提交快照前要在仓库里读 `<table>/schema/schema-<n>` 取 schemaId，而服务端那时
+    只把 schema 存进了自己的数据库；补上物化（`TableMetadataService`）之后这条链路通畅。
+    快照文件（`<table>/snapshot/snapshot-<n>`）是同一件事的另一半：`RESTCatalog` 声明
+    `supportsVersionManagement()`，提交快照由服务端代收，客户端从不自己写这份文件——
+    而 REST 的读路径也走服务端，所以缺了它只会表现为「绕开服务端看仓库时没有 snapshot 目录」。
+    服务端因此需要 Paimon 核心与 FileIO 依赖，并能写仓库——仓库在对象存储上时还要给服务端加
+    对应 scheme 的 FileIO 实现。三档开关与取舍见
+    [`docs/spark-paimon-rest-e2e.md`](docs/spark-paimon-rest-e2e.md) 第 4 节。
 18. **存储配置的跨类型字段被静默忽略**。`storageType` 为 `FILE` 却带 `roleArn` 的请求
     不会报 400，而是丢掉该字段——全站都依赖 Spring 默认的宽松绑定，为存储配置单独收紧
     会造成「只有这个接口严格」的不一致。代价是拼错的字段名不会被发现。
@@ -509,12 +539,28 @@ Azure 只下发定位元数据是个明确的缺口：Polaris 的 `polaris.stora
     换值后，库里已有的密文用新密钥解不开，读取那个 catalog 的凭据会以 **500** 明确失败
     （不是静默退回服务端配置），需要重新提交一次凭据。做成多代密钥要同时保存密钥列表与
     「这条密文是第几代」，当前规模下不值得；代价是**轮换密钥必须配合一次凭据重录**。
+21. **运行服务端只能用 JDK 17，不能用 18 及以上。** 第 17 条说服务端要把 schema 与快照
+    写进仓库；仓库在对象存储上时，这条链路在 JDK 18+ 上**必然失败**，且报错与 S3 毫无关系：
+    JDK 18 的 JEP 418 给 `InetAddress` 加了解析器 SPI，`InetAddress.loadResolver()` 会
+    `ServiceLoader` 找 `InetAddressResolverProvider`；而 Paimon 2.0.0 的 `paimon-s3` 插件包把
+    dnsjava 那个 provider 的声明放在插件根、实现类放在 `META-INF/versions/18/`
+    （多版本 jar 布局，解成插件目录后不再生效），`PluginFileIO` 又把线程上下文类加载器切成
+    插件 loader，于是那块作用域里任何 `InetAddress` 解析都抛
+    `ServiceConfigurationError: ... DnsjavaInetAddressResolverProvider not found`，
+    触发点是 Hadoop `MetricsSystemImpl.getHostname()`。
+    服务端对这种失败的处理是**按配置降级**：`ServiceConfigurationError` 属于 `Error`，
+    已与 `LinkageError` 一起被 `TableMetadataService.attempt()` 接住，因此默认
+    （`fail-on-error=false`）只记一条 WARN、建表照样成功——但仓库里那份 schema / 快照
+    就是写不出去。所以「S3 表建得出来、用 REST 读写也正常，桶里却没有 `schema/` 与
+    `snapshot/`」这个现象，先查服务端跑在哪个 JDK 上。
+    `Dockerfile` 两个阶段都钉 17 就是为了这条；17 没有这条 SPI，问题不存在。
+    这是上游插件打包的问题，不是本仓库代码的问题。
 
 ---
 
 ## 7. 测试
 
-### 单元与集成测试（334 个用例）
+### 单元与集成测试（346 个用例）
 
 ```bash
 JAVA_HOME=/path/to/jdk-21 ./mvnw test
@@ -523,18 +569,19 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 测试连的是内存 H2（`test` profile，见 `src/test/resources/application-test.yml`），
 **不依赖本机是否有 MySQL**。
 
-服务端（258 个）：
+服务端（267 个）：
 
 | 测试类 | 覆盖 |
 | --- | --- |
 | `PaimonRestCatalogApiTests` | 配置发现、建表与 schema 变更（加列 / 列改名 / 改类型 / 改可空性 / 改属性）/ 回滚、快照提交与乐观并发、分区统计、表重命名（改名不动数据位置、跨库重命名、目标名被占用 409）、视图与函数、语义视图 1 MiB 上限、消费者位点、凭证下发与 403、各类 404 的 `resourceType` |
+| `TableMetadataMaterializationTests` | 把 schema 与快照物化到 Paimon 表目录：建表写 `schema-0`、改表写下一个号、回滚把旧内容写到**新号**（回滚也是向前一步）、`register` 进来的外部表一个文件都不碰、缺 FileIO 实现时默认只记日志不打断请求（并断言打开 `fail-on-error` 后确实变成 500）；快照侧写 `snapshot/snapshot-<id>` 与 `LATEST`、落盘的是客户端**原文**（`properties` 这类规格没建模的字段不能丢）、`VERSION AS OF <数字>` 按**快照 id** 而不是 `Snapshot.version` 取值（含 `LATEST` / `EARLIEST` / 标签名）、快照回滚会删掉目标之后的快照文件；钉住「数据库 `schemaId` ↔ 仓库 `schema-<n>`」与「数据库 `snapshotId` ↔ 仓库 `snapshot-<n>`」逐号对应 |
 | `ManagementApiTests` | 管理 API 的主体、角色、装配与授权链路 |
 | `StorageConfigApiTests` | `storageConfigInfo` 六种存储类型的建 / 读 / 改往返、`AZURE` 缺 `tenantId` 与空位置的 400、换存储后新库位置随之改变、OBS↔OSS 换类型时端点一起替换 |
 | `StorageConfigDtosTests` | 判别联合的绑定位形：子类型注册名与枚举一致、判别字段只出现一次、跨类型字段不串、落库路径（`Json`）往返、静态凭据字段随实体往返 |
 | `StorageCredentialApiTests` | 按存储类型下发凭据的 HTTP 链路：S3 的密钥来源（默认配置与具名存储）与不下发 `endpointInternal` / `stsEndpoint`、`stsUnavailable` 时不给密钥、Azure 只给定位元数据、GCS 的 `lifespan` 收窄 `expiresAt`、OBS / OSS 各自走对键族且不串族、FILE 保留自包含令牌、未过期凭据被复用（比对 `expiresAt` 而非密钥） |
 | `StorageCredentialResolutionTests` | 凭据解析与缓存的单元行为：具名存储优先且找不到时明确失败而非退回默认凭据、服务端专用字段不泄露、Azure 账户名只在已知端点后缀上解析、GCS `lifespan` 与 `ttl` 取小、OBS / OSS 的键名族与临时凭据令牌（含两家不同拼写）、两家的凭据互不可见、LRU 淘汰与过期失效、两个策略枚举的取值校验与错误信息；**catalog 静态凭据压过一切服务端来源、在 `stsUnavailable` 下仍然下发、OBS / OSS 各走自己的键族、密文解不开或不是密文时明确失败而非静默退回** |
 | `StaticCredentialApiTests` | catalog 静态凭据的 HTTP 语义（配了加密密钥）：创建响应不回显密钥而库内是密文且能解回原值、凭据下发优先用 catalog 这一份、`PUT` 省略密钥表示保持、完全不带凭据字段也表示保持、提交一对空串即清除并退回服务端配置、只给密钥 / 换 ID 不带新密钥 / 空 ID 配非空密钥各自 400、与 `storageName` 互斥 400、OBS 与 OSS 同样支持、meta 报告 `staticCredentialsEnabled` |
-| `StaticCredentialDisabledApiTests` | 未配 `credential-secret-key` 时的 fail-closed：保存静态凭据返回 400 且错误信息点明配置项与 `openssl rand -base64 32`、**不带凭据的 catalog 照常可建**（对照组，防「顺手把整个存储配置关掉」）、meta 报告能力已关闭 |
+| `StaticCredentialDisabledApiTests` | 未配 `credential-secret-key` 时的 fail-closed（`test` profile 里显式把该键置空——`application.yml` 那份是给人手工起实例用的）：保存静态凭据返回 400 且错误信息点明配置项与 `openssl rand -base64 32`、**不带凭据的 catalog 照常可建**（对照组，防「顺手把整个存储配置关掉」）、meta 报告能力已关闭 |
 | `CredentialCipherTests` | 落库加解密单元行为：往返、同一明文两次密文不同（随机 IV）、空值保持空、未配密钥时拒绝加密、换密钥后解不开、密文被篡改时认证失败、明文当密文传入被拒、密文载荷畸形被拒、密钥不是 Base64 或解码后不是 32 字节时启动即失败、留空的密钥视为关闭 |
 | `StoragePolicyApiTests` | `file-io.type=s3` 时拒绝 Azure / GCS / OBS / OSS catalog 并在报错里点明原因、接受 S3 与 FILE；`credential-manager.type=noop` 时凭据下发返回 501 |
 | `AuthorizationTests` | 权限蕴含与判定的单元行为 |
@@ -552,7 +599,7 @@ JAVA_HOME=/path/to/jdk-21 ./mvnw test
 | `MysqlDdlGeneratorTests` | 由实体元数据生成 MySQL DDL，并断言方言被钉在 MySQL 8.0（见「代码生成」） |
 | `PaimonRestServerApplicationTests` | 上下文加载 |
 
-Spark 子模块（76 个，其中 14 个需要显式指向服务端）：
+Spark 子模块（79 个，其中 17 个需要显式指向服务端）：
 
 | 测试类 | 覆盖 |
 | --- | --- |
@@ -560,8 +607,9 @@ Spark 子模块（76 个，其中 14 个需要显式指向服务端）：
 | `ManagementApiClientTests` | 请求方法与路径、请求体字段形状、路径段编码、`ALTER` 的读-合并-回写、单资源裸对象与状态码、错误映射 |
 | `ManagementSqlExecutionTests` | 真实 `SparkSession` + 桩服务端：扩展是否真被加载、`spark.sql` 是否真执行命令、结果行列名、原生 SQL 不受影响 |
 | `ManagementSqlLiveServerTests` | 对真实服务端跑完整 SQL 链路（默认跳过，见下） |
-| `PaimonTableDdlTests` | 用 Spark SQL 经 Paimon Rest Catalog 建表：分区 append 表与主键表（含分区主键）、`LIKE`、`IF NOT EXISTS` 幂等与裸建冲突、内联主键约束与保留表属性被 Spark 拒绝、库不存在时报错，以及 `CTAS` 因数据面缺失而失败的守卫用例；两种断言并重——`DESCRIBE` / `SHOW CREATE TABLE` 的输出，以及直接读服务端元数据核对注释、分区键、主键与选项（默认跳过，见下） |
+| `PaimonTableDdlTests` | 用 Spark SQL 经 Paimon Rest Catalog 建表再写入：分区 append 表与主键表（含分区主键）、`LIKE`、`IF NOT EXISTS` 幂等与裸建冲突、内联主键约束与保留表属性被 Spark 拒绝、库不存在时报错，以及 `CTAS` 与分区主键表 `INSERT` 写完后读回数据；两种断言并重——`DESCRIBE` / `SHOW CREATE TABLE` 的输出，以及直接读服务端元数据核对注释、分区键、主键与选项（默认跳过，见下） |
 | `SparkSqlDocExamplesTests` | 抽出 `docs/spark-sql-reference.md` 第 11 节的示例并逐条执行，断言撤销语义与清理结果（默认跳过，见下） |
+| `PaimonRestCatalogTest` | 对象存储仓库的凭据链路：建表后服务端返回的 `path` 由 warehouse 模板展开、`INSERT` 写入分区主键表并逐列读回（默认跳过，见下）。它同时压住「类路径缺 `s3://` FileIO 实现」与「凭据没按引擎认的键名下发」这两种失败 |
 | `PaimonRestManagementTests` | 配置解析的容错 |
 
 ### 端到端验收脚本
@@ -681,8 +729,9 @@ python3 -m pip install --user PyYAML
 docker build -t paimon-rest-server:0.0.1 .
 ```
 
-多阶段构建：构建阶段用 `maven:3.9-eclipse-temurin-21`，运行阶段只留
-`eclipse-temurin:21-jre-noble` 加一个 jar，镜像里不含 Maven 仓库与源码。
+多阶段构建：构建阶段用 `maven:3.9-eclipse-temurin-17`，运行阶段只留
+`eclipse-temurin:17-jre-noble` 加一个 jar，镜像里不含 Maven 仓库与源码。
+**两个阶段都钉 17，不要升到 18 及以上**——理由见第 2 节开头（S3 物化的 DNS 解析）。
 运行时以 uid 10001 非 root 运行；`ENTRYPOINT` 用 exec 形式，让 SIGTERM 直达 JVM，
 配合 Spring Boot 的优雅停机。
 

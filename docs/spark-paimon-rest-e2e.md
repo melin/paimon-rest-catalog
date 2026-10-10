@@ -180,6 +180,21 @@ DESCRIBE paimon.demo.orders;
 SHOW CREATE TABLE paimon.demo.orders;
 ```
 
+时间旅行：
+
+```sql
+-- 数字是**快照 id**（客户端从 1 开始递增分配），不是「第几个版本」，
+-- 也不是快照 JSON 里的 version——后者是快照文件格式版本，每个快照都是同一个值（当前 3）
+SELECT * FROM paimon.demo.orders VERSION AS OF 2;
+
+-- 标签名也可以放在这里：标签本身就是「给某个快照起的名字」
+SELECT * FROM paimon.demo.orders VERSION AS OF 'v1';
+```
+
+服务端对 `version` 的解析顺序与 Paimon 客户端一致：`EARLIEST` / `LATEST` / 数字（快照 id）/
+标签名，前三者之外的一律按标签名查，取不到回 404。写成 `VERSION AS OF 3` 而表里只有快照
+1 与 2 时，得到的是 404，而不是「第 3 版」——这一点容易与「版本号」的直觉搞混。
+
 ---
 
 ## 3. 服务端保存了什么
@@ -224,18 +239,24 @@ curl -H 'Authorization: Bearer root' \
 
 ---
 
-## 4. 边界：本服务端不做数据面写入
+## 4. 服务端会物化 Paimon 表目录
 
-本服务端保存的是**元数据**，不承担 Paimon 仓库侧的元数据物化。因此：
+本服务端保存**服务端数据库里的元数据**，并把其中引擎读写必需的那一部分
+**物化到 Paimon 表目录**——具体是 `schema/schema-<n>` 与 `snapshot/snapshot-<n>`
+（外加 `snapshot/LATEST` 提示文件）。因此：
 
 | 能力 | 状态 |
 | --- | --- |
 | 建库、建表（含分区、主键、选项、注释、`LIKE`） | 可用 |
 | `SHOW TABLES` / `DESCRIBE` / `SHOW CREATE TABLE` | 可用（读的是服务端元数据） |
 | `DROP TABLE` / `DROP DATABASE` | 可用 |
-| `INSERT` / `CREATE TABLE ... AS SELECT` / `SELECT` 数据 | **不可用** |
+| `INSERT` / `CREATE TABLE ... AS SELECT` / `SELECT` 数据 | 可用 |
+| 绕开服务端、直接读仓库的读端（Paimon CLI、以文件系统为源的快照枚举等） | 可用（元数据已落进仓库） |
 
-写入失败时的报错链是：
+### 4.1 为什么必须物化 schema 与快照文件
+
+`INSERT` 走到提交快照那一步时，引擎会在**仓库**里读 `<table>/schema/schema-<n>`
+取 schemaId。这个文件不在，就抛：
 
 ```
 RuntimeException: Exception occurs when preparing snapshot #1 by user <uuid> with hash
@@ -243,22 +264,101 @@ RuntimeException: Exception occurs when preparing snapshot #1 by user <uuid> wit
   -> RuntimeException: Cannot get latest schema for table orders
 ```
 
-原因不在本服务端「拒绝」了写入：Paimon 客户端把数据文件按 `path` 写到了仓库
-（分区目录与 parquet 文件都正常生成），随后提交快照时要在仓库里找到 Paimon 自己维护的
-`schema/schema-<n>` 文件——那是 Paimon Rest Catalog 服务端应当写入的，本服务端目前没有做。
-这是一个明确的缺口，不是配置问题。
+并回滚这次提交，把已经写好的 parquet 文件与 manifest 留在目录里当孤儿。
+所以缺的从来不是「服务端拒绝写入」，而是「服务端把 schema 存在自己库里、
+却没落到引擎要看的那个位置」。
 
-`PaimonTableDdlTests.createTableAsSelectNeedsADataPlaneTheCatalogDoesNotHave` 是这条边界的
-**守卫用例**：它断言的是「当前不可用」而不是「期望不可用」——等数据面补齐，它会失败，
-从而提醒改动者回来更新本节。它同时断言失败是**原子**的：写入阶段出错不会在 catalog 里留下
-一张空表，这一点决定了失败之后要不要手工清理，光看报错看不出来。
+**这份责任为什么在服务端。** Paimon 的 REST Catalog 客户端是瘦客户端：
+`RESTCatalog.createTable` 只把 schema POST 给服务端，客户端代码里根本没有写
+`schema/schema-<n>` 的路径。对照之下，`HiveCatalog`（自己就是表的拥有者）
+的 `createTableImpl` 会先 `SchemaManager.createTable` 写目录与 schema 文件、
+再登记 HMS。换成 REST 形态，这一步就落到了服务端——官方 REST 服务端是内嵌一个
+文件系统 catalog 来做的，本工程按同样的分工实现，见 `TableMetadataService`。
 
-仓库落在对象存储上时，这条边界还顺带成了**凭据链路**的观测点：写入必然要碰
-`s3://` 上的 `<table>/snapshot` 与 `<table>/schema`，因此它也是客户端第一次真正访问
-对象存储的地方。`PaimonRestCatalogTest.writeStopsAtTheDocumentedDataPlaneGap` 据此把
-「失败停在哪一步」钉住——停在上面这条链上，说明类路径与凭据都到位；停在
-`UnsupportedSchemeException`，说明缺 FileIO 实现（见 1.1）；停在一句 `UnknownReason`，
-说明凭据没送到客户端（见 1.4）。
+**号必须与数据库里的 `schemaId` 逐号对应**，这不是格式问题而是语义问题：
+
+| 动作 | 写出的文件 | `schemaId` |
+| --- | --- | --- |
+| 建表 | `schema-0` | `0` |
+| `ALTER TABLE` | `schema-<n>` | `n`（递增） |
+| `rollback-schema` | 把旧内容写到 `schema-<新号>` | 回滚在版本号上也是**向前一步**，不复用旧号 |
+
+落库与落仓库的顺序也固定：**先落库再落仓库**。严格模式（见 4.2）下仓库写入失败会
+让整个事务回滚，catalog 里不会留下一张没有 schema 文件的表；反过来先写仓库再落库，
+失败时留下的是仓库里的孤儿目录，而那种残留没有任何接口能清理。
+
+挂接点是 `TableService` 的 create / alter / rollback-schema / drop / commit / rollback
+六处。`register` **刻意不挂**：它的语义是「仓库里已经有一张表，本服务端只登记它的位置」，
+往那个目录里写 schema 等于用服务端的空 schema 覆盖那张表的真实元数据，是数据损坏
+而不是补全。`external=true` 的表在后续所有写入路径上同样被跳过。
+
+**快照是同一件事的另一半，而且它的缺失更隐蔽。** 提交快照时，`SnapshotCommit` 实现的选择在
+`CatalogEnvironment.snapshotCommit`：`catalogLoader != null && supportsVersionManagement`
+时用 `CatalogSnapshotCommit`（把 `Snapshot` 对象 POST 给 `/tables/{t}/commit`），
+否则才用 `RenamingSnapshotCommit` 自己写 `snapshot/snapshot-<n>`。
+`RESTCatalog.supportsVersionManagement()` **恒返回 true**，所以走 REST catalog 的客户端
+从不写快照文件，`RenamingSnapshotCommit` 在这条链路上根本不会被实例化。
+
+不写会怎样：**用 REST catalog 读写一切正常**——读路径也走服务端，
+`SnapshotLoaderImpl.load()` 调的就是 `catalog.loadSnapshot(identifier)`，
+查的是服务端数据库。于是「查得出来数据」与「仓库里没有 snapshot 目录」可以同时成立，
+只有绕开服务端直接看仓库时才会露出来。本服务端因此把
+`RenamingSnapshotCommit.commit` 的两步（原子写 `snapshot/snapshot-<id>` + 更新
+`snapshot/LATEST`）在服务端重做一遍。
+
+写进仓库的内容是**客户端发来的那一段 JSON 原文**，不是按服务端数据库字段重新拼的：
+规格里的 `Snapshot` 只建模了一部分字段，客户端的 `org.apache.paimon.Snapshot` 还带
+`properties`（序列号水位）、`operation`、`nextRowId` 等。按 DTO 重拼会静默丢字段，
+而丢 `properties` 尤其阴——它不会解析失败，只会让读端重算序列号，表现为去重与变更日志
+语义悄悄改变。快照文件同样先解析一遍 Paimon 自己的模型再落盘：写进去的东西至少要能被
+Paimon 读回来。
+
+回滚快照（`rollback`）会把目标之后的 `snapshot-<id>` 删掉、把 `LATEST` 指回目标。
+只改库不删文件，留下的是「数据库说只有快照 1、仓库里有 1/2/3 且 `LATEST` 指着 3」。
+
+### 4.2 三档开关
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `paimon.rest.table-metadata.enabled` | `true` | 是否物化 schema 与快照。`external` 表始终不物化 |
+| `paimon.rest.table-metadata.fail-on-error` | `false` | 物化失败时是否让请求失败（500 且事务回滚）。默认「尽力而为」：记一条 WARN，元数据照常落库；打开后建表与提交快照会因仓库不可写而直接失败 |
+| `paimon.rest.table-metadata.purge-on-drop` | `false` | `DROP TABLE` 时是否连表目录一起删。默认只删元数据、保留数据，删错不可逆 |
+
+**仓库在对象存储上时，服务端自己也要有对应 scheme 的 FileIO 实现。**
+这一步与第 1.1 节客户端那件事是**两件独立的事**，缺任何一件都在各自的进程里失败：
+
+- 客户端缺 → `UnsupportedSchemeException`，报在 Spark 侧；
+- 服务端缺 → 物化失败，报在服务端日志里（`fail-on-error=false` 时只是一条 WARN，
+  于是表现又回到 `Cannot get latest schema`）。
+
+`paimon-core` 自带的 SPI 实现只有 `file` / `hdfs` / `viewfs` 三种（启动后日志会打一行
+`discovered Paimon FileIO implementations for schemes [...]`，可以据此确认）。
+`s3://` / `obs://` / `oss://` 要按 Paimon 的插件机制额外把对应构件放进服务端类路径，
+例如 `org.apache.paimon:paimon-s3:<版本>`。
+
+**对象存储上还有第二个前提：服务端运行时必须是 JDK 17，不能是 18 及以上。**
+JDK 18 的 JEP 418 给 `InetAddress` 加了解析器 SPI，`InetAddress.loadResolver()` 会
+`ServiceLoader` 找一个 `InetAddressResolverProvider`；而 `paimon-s3` 插件包把 dnsjava 那个
+provider 的**声明**放在插件根、**实现类**放在 `META-INF/versions/18/`（多版本 jar 布局，
+解成插件目录后不再生效），`PluginFileIO` 又把线程上下文类加载器切成插件 loader，
+于是那块作用域里**任何** `InetAddress` 解析都抛
+`ServiceConfigurationError: ... DnsjavaInetAddressResolverProvider not found`，
+触发点是 Hadoop `MetricsSystemImpl.getHostname()`。后果是 `s3://` 上的
+`<table>/schema` 与 `<table>/snapshot` 一个文件都写不出去——而因为是插件隔离的异常类，
+现象与 S3 看着毫无关系。`Dockerfile` 两个阶段都钉 17 就是为了这条。
+
+### 4.3 这两个边界用例为什么会翻转
+
+`PaimonTableDdlTests.createTableAsSelectWritesDataAndReadsItBack`
+与 `PaimonRestCatalogTest.insertWritesThroughAndIsReadable` 曾经断言的是写入**失败**，
+并且把失败链钉在某一步上。那是刻意的**守卫用例**：断言「当前不可用」而不是
+「期望不可用」，边界一移动就先响，提醒改动者回来同步本节。
+
+schema 物化补上之后它们已经翻转成断言写入成功。这个类保留下来的、仍然压着
+「失败停在哪儿」的部分是**别的东西**：写入必然要碰 `s3://` 上的 `<table>/schema`
+与 `<table>/snapshot`，因此它也是客户端第一次真正访问对象存储的地方——停在
+`UnsupportedSchemeException` 说明客户端类路径缺 FileIO 实现（见 1.1）；
+停在一句 `UnknownReason` 说明凭据没按引擎认的键名送达（见 1.4）。
 
 ---
 
@@ -271,7 +371,9 @@ RuntimeException: Exception occurs when preparing snapshot #1 by user <uuid> wit
 | `ParseException`（无正文），语句里含 `PRIMARY KEY (...) NOT ENFORCED` | Spark 3.5 的 `CREATE TABLE` 语法不接受列定义里的主键 | 改用 `TBLPROPERTIES ('primary-key' = '<列>')` |
 | `You should define a 'bucket-key' for bucketed append mode` | 追加表**显式**给了固定 `bucket` 却没给分桶键。不给 `bucket` 时 Paimon 用动态分桶，不需要它 | 加 `'bucket-key'`，或改成 `'bucket' = '-1'` |
 | `ParseException: ... is a reserved table property` | `TBLPROPERTIES` 里写了 Spark 自己的保留属性（如 `owner`）。这条在客户端解析阶段就被拒，请求根本没到服务端 | 删掉该属性。`owner` 由服务端按提交者自己补，不是客户端该传的字段 |
-| `Cannot get latest schema for table <表名>` | 数据面未实现，见第 4 节 | 目前仅建表可用 |
+| `Cannot get latest schema for table <表名>` | 引擎在仓库里读不到 `<table>/schema/schema-<n>`。服务端已负责物化它（见第 4 节），因此这条报错现在只意味着**物化那一步没成功** | 看服务端日志里 `TableMetadataService` 的 WARN：若提示缺对应 scheme 的 FileIO 实现，把 `paimon-s3` / `paimon-obs` / `paimon-oss` 加进服务端类路径；若服务端根本不该写仓库，把 `paimon.rest.table-metadata.enabled` 设为 `false` 并把 `fail-on-error` 打开，让它在建表时就明确失败，而不是拖到写入 |
+| 服务端 WARN 里出现 `ServiceConfigurationError: java.net.spi.InetAddressResolverProvider: Provider org.xbill.DNS.spi.DnsjavaInetAddressResolverProvider not found` | 服务端跑在 JDK 18+ 上，而 `paimon-s3` 插件包把 dnsjava 那个 provider 的实现类放在 `META-INF/versions/18/`，插件 loader 加载不到 → 该作用域内任何 `InetAddress` 解析都失败（触发点是 Hadoop 度量系统的 `getHostname`） | **把服务端运行时换成 JDK 17**，见 4.2。这是唯一可靠的处理；这条 WARN 会让对象存储上的 schema / 快照都写不出去，而 REST 读写看着一切正常 |
+| `Cannot get latest schema for table <表名>`（服务端日志里**没有**对应 WARN） | 物化那一步压根没被触发：`paimon.rest.table-metadata.enabled=false`，或者表是 `register` 进来的 `external` 表 | 前者打开开关；后者是有意不物化的（位置不归本服务端所有），需要引擎侧自己保证目录里有 schema |
 | `Content-Type 'text/plain;charset=UTF-8' is not supported` | 服务端未放宽 JSON 转换器。Paimon 客户端（Apache HttpClient 5）把 JSON 请求体标成 `text/plain`，早期版本会因此 415 | 已由 `JsonContentTypeConfig` 修复；若仍遇到，确认服务端版本 |
 
 ---
@@ -300,8 +402,8 @@ java -jar paimon-rest-server/target/paimon-rest-server-0.0.1-SNAPSHOT.jar \
   --paimon.rest.authorization.service-admins[0]=root \
   --paimon.rest.authorization.bootstrap-principal=root
 
-# 对着它跑建表用例
-./mvnw -o -pl paimon-rest-spark test -Dtest=PaimonTableDdlTests \
+# 对着它跑建表与写入用例
+mvn -o -pl paimon-rest-spark test -Dtest=PaimonTableDdlTests \
   -De2e.management.url=http://127.0.0.1:18080/api/management/v1 \
   -De2e.management.token=root
 ```

@@ -39,7 +39,13 @@ public class TableSnapshotEntity {
     @Column(name = "snapshot_id", nullable = false)
     private long snapshotId;
 
-    /** 规格中的 {@code Snapshot.version}，从 1 递增。 */
+    /**
+     * 规格中的 {@code Snapshot.version}：快照**文件格式版本**，不是自增序号。
+     *
+     * <p>客户端每个快照都送同一个值（{@code Snapshot.CURRENT_VERSION}，Paimon 2.0 是 3），
+     * 所以它当不了查询键——按「第 n 个快照」取快照的是
+     * {@code TableService.getVersionSnapshot}，那里查的是 {@code snapshot_id}。
+     */
     @Column(name = "version_number")
     private Integer version;
 
